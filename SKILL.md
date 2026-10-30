@@ -104,17 +104,43 @@ P 置信度      Q 审核状态    R 关联知识点  S 备注
 3. **一处改数，全链重算。** 台账 → 附表 → 派生配置 → 报告 → PPT，每环一个可重跑断言。
    任何进报告的数字必须从台账脚本复算，不许从上一版文档抄。
 4. **「不知道」与「查到零」必须分列。** 通道不通、抓不到正文、没检索过 —— 三种都不是「没有这件事」。
+5. **量级不合理就不许交付。** `gate_plausibility` 失败时必须回去换数据源补量，
+   不许用「覆盖有限」一句话带过。**内部自洽 100% 通过、外部量级差两个数量级，是这类工作最危险的失败方式** ——
+   它不会报错，只会安静地交出一份没法用的东西。
 
-## 五个确定性门禁
+## 确定性门禁
 
 ```bash
 python scripts/env_check.py --ppt                                   # 0 环境 / 2 缺依赖
+
+# —— 找全 ——
+python scripts/harvest_wiki_events.py --month 2026-08 --out 候选.jsonl   # 0 候选够量 / 2 太少
+python scripts/extract_events.py --in 候选.jsonl --out 事件.jsonl         # 结构化抽取
+python scripts/filter_war_context.py --in 事件.jsonl --out 分流.jsonl     # 战争语境分流
+
+# —— 判对 ——
 python scripts/make_ledger.py --check 台账.xlsx                     # 0 表头==19列 / 2 不符
-python scripts/gate_table_roundtrip.py 改前.xlsx 改后.xlsx          # 0 无意外差异（改前改后同一份表）
+python scripts/gate_table_roundtrip.py 改前.xlsx 改后.xlsx          # 0 无意外差异
 python scripts/gate_date_published.py 候选.jsonl --month 2026-08     # 0 月份全部确证
 python scripts/gate_number_drift.py 台账.xlsx --rows 2-30 --expect 790:238  # 0 加总==公布
+
+# —— 量级合理（最重要，默认阻断交付）——
+python scripts/gate_plausibility.py 台账.xlsx                        # 0 可信 / 2 不可信
+
+# —— 交付 ——
 python scripts/gate_single_file.py 交付/index.html --pages <你的页数>        # 0 可离线
 ```
+
+几个门禁各自挡的是真实事故：
+
+| 门禁 | 挡的是什么 |
+|---|---|
+| `make_ledger --check` | 表头少一个斜杠、括号写成半角 → 交付被退回 |
+| `gate_number_drift` | 空表假通过；「数十人」被算成 0；表内合计写错 100 倍不报 |
+| `gate_date_published` | URL 里是旧日期、正文其实是新月 → 事件记错月份 |
+| `gate_table_roundtrip` | 改表时整列被写成空白，全程无报错 |
+| `gate_single_file` | PPT 带外链，断网演示不了；条形宽度为 0 |
+| **`gate_plausibility`** | **内部全绿但量级不可信**：17 条就交付，而该国同月 500 起事件；高发国家 0 条 |
 
 全部 `0 = 通过 / 2 = 有失败项 / 1 = 无法判定`，都支持 `--json`。
 **不要用「我看了一眼没问题」代替它们** —— 本项目整列数据被写成空白、死链被当成有效、
@@ -124,6 +150,10 @@ PPT 溢出 246px、条形宽度为 0，肉眼一次都没看出来。
 > 溢出、动画、截图必须在浏览器里真看一遍，方法见 `reference/06-交付.md`。
 
 ## 两种规模模式（先选，再开工）
+
+> **红线**：小规模模式**禁止**用于「月度全域台账」。
+> 它只适用于单周、单国、专题试跑。用错场景的典型后果就是：交出一份 17 条、
+> 而委托方一句「尼日利亚这个月就 3 起？」就问穿。
 
 | | 小规模（≤30 条事件） | 完整（整月/整域） |
 |---|---|---|
