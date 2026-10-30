@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>事件台账 · 展示</title>
+<!--
+  单文件网页 PPT 起手工程
+  ========================
+  改成你要的标题与内容，然后：
+    1) 把示例页换成你的真实内容
+    2) 批量填数：python scripts/fill_deck.py --deck deck/index.html --values report_values.json
+    3) 出门禁：python scripts/gate_single_file.py deck/index.html --pages N
+
+  三条硬规则（都是踩出来的）：
+    a. 不许有任何 http(s):// 外链 —— 断网就演示不了
+    b. 不许用 fetch 读 json —— file:// 下被 CORS 拦，数据必须内联成 JS 变量
+    c. 字体只用系统栈 —— 不许 Google Fonts
+  本文件已按这三条写好，直接改内容即可。
+
+  键盘：←/→ 翻页 · 空格 下一屏动效 · F 全屏 · S 缩略图 · B 静态模式
+-->
+<style>
+:root{
+  --bg:#FBFAF7; --ink:#0E0E10; --dim:#6B6B72; --line:#E3E0D8;
+  --accent:#002FA7;          /* 克莱因蓝 IKB */
+  --accent-bright:#5B7BFF;   /* 深色页上必须用这个，IKB 对比度不够 */
+  --warm:#D9481F; --gold:#C89B3C; --green:#3F7D54;
+  --white:#FFFFFF;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);
+  font-family:"PingFang SC","Microsoft YaHei","Noto Sans CJK SC","Helvetica Neue",sans-serif;
+  -webkit-font-smoothing:antialiased}
+
+#deck{position:relative;width:100vw;height:100vh}
+.slide{position:absolute;inset:0;display:none;padding:6vh 7vw 10vh;
+  flex-direction:column;justify-content:center}
+.slide.on{display:flex}
+
+.kicker{font:600 1.05vw/1.4 ui-monospace,Menlo,Consolas,monospace;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--accent);margin-bottom:1.6vh}
+h1{font-size:4.4vw;line-height:1.08;font-weight:800;letter-spacing:-.01em}
+h2{font-size:2.9vw;line-height:1.16;font-weight:750;letter-spacing:-.008em}
+h3{font-size:1.5vw;line-height:1.4;font-weight:650}
+.sub{font-size:1.35vw;line-height:1.6;color:var(--dim);margin-top:2.2vh;max-width:64ch}
+.rule{height:2px;width:6vw;background:var(--accent);margin:2.4vh 0}
+
+/* ---- 数字大字报 ---- */
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:2.2vw;margin-top:4vh}
+.kpi{border-top:3px solid var(--ink);padding-top:1.6vh}
+.kpi b{display:block;font-size:3.6vw;line-height:1;font-weight:800;
+  font-variant-numeric:tabular-nums}
+.kpi span{display:block;font-size:.95vw;color:var(--dim);margin-top:1vh;letter-spacing:.02em}
+
+/* ---- 数据表 ---- */
+table{width:100%;border-collapse:collapse;font-size:1.02vw;margin-top:2.4vh}
+th{text-align:left;font-weight:700;border-bottom:2px solid var(--ink);
+  padding:.9vh .6vw;font-size:.92vw;letter-spacing:.04em;color:var(--dim)}
+td{padding:.85vh .6vw;border-bottom:1px solid var(--line);
+  font-variant-numeric:tabular-nums}
+td.num{text-align:right}
+tr.hl td{background:#F2F4FF;font-weight:650}
+
+/* ---- 条形 ---- */
+.bars{margin-top:3vh}
+.bar{display:grid;grid-template-columns:11vw 1fr 5vw;align-items:center;
+  gap:1vw;margin-bottom:1.15vh;font-size:1.05vw}
+.bar i{font-style:normal;color:var(--dim);text-align:right;
+  font-variant-numeric:tabular-nums}
+.bar .track{display:block;height:1.5vh;background:#EDEAE2;border-radius:2px;overflow:hidden}
+.bar .fill{display:block;height:100%;background:var(--accent);width:0;
+  transition:width .85s cubic-bezier(.2,0,.38,.9)}
+.bar b{font-weight:700;font-variant-numeric:tabular-nums}
+
+/* ---- 深色页 ---- */
+.slide.dark{background:#0E0E10;color:#F5F4F0}
+.slide.dark .kicker{color:var(--accent-bright)}
+.slide.dark .rule{background:var(--accent-bright)}
+.slide.dark .sub{color:#A8A8B0}
+.slide.dark .kpi{border-top-color:#F5F4F0}
+.slide.dark .kpi span{color:#A8A8B0}
+.slide.dark .bar .track{background:#26262C}
+
+/* ---- 页脚 / 页码 ---- */
+.pager{position:fixed;right:2.2vw;bottom:2.4vh;font:500 .92vw/1 ui-monospace,Menlo,monospace;
+  color:var(--dim);letter-spacing:.08em;font-variant-numeric:tabular-nums}
+.foot{position:fixed;left:2.2vw;bottom:2.4vh;font-size:.82vw;color:var(--dim)}
+
+/* ---- 缩略图索引 ---- */
+#overview{position:fixed;inset:0;background:#0E0E10ee;display:none;z-index:50;
+  padding:5vh 5vw;overflow:auto;grid-template-columns:repeat(4,1fr);gap:1.6vw}
+#overview.on{display:grid}
+#overview .th{background:var(--bg);border-radius:4px;padding:1.2vw;cursor:pointer;
+  font-size:.9vw;color:var(--dim);min-height:11vh}
+#overview .th b{display:block;color:var(--ink);font-size:1.05vw;margin-bottom:.6vh}
+
+/* 静态模式：关掉一切过渡（截图/演示卡顿时按 B） */
+body.low-power *{transition:none!important;animation:none!important}
+</style>
+</head>
+<body>
+<div id="deck">
+
+<!-- ============================================================
+     示例页 1 · 封面
+     改 title / subtitle / 日期即可
+     ============================================================ -->
+<section class="slide dark">
+  <div class="kicker">月度事件台账</div>
+  <h1>2026 年 8 月<br>全球恐怖主义事件</h1>
+  <div class="rule"></div>
+  <p class="sub">覆盖 <b data-v="countries">—</b> 个国家 / 地区　·　计入 <b data-v="events">—</b> 起　·　死亡 <b data-v="deaths">—</b>　·　受伤 <b data-v="injuries">—</b></p>
+</section>
+
+<!-- ============================================================
+     示例页 2 · 数字对照（KPI 大字报）
+     ============================================================ -->
+<section class="slide">
+  <div class="kicker">Core Numbers</div>
+  <h2>核心数字</h2>
+  <div class="kpis">
+    <div class="kpi"><b data-v="events">—</b><span>计入事件</span></div>
+    <div class="kpi"><b data-v="deaths">—</b><span>死亡</span></div>
+    <div class="kpi"><b data-v="injuries">—</b><span>受伤</span></div>
+    <div class="kpi"><b data-v="countries">—</b><span>覆盖国家/地区</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     示例页 3 · 排行（条形）
+     data-bar / data-val 由 fill_deck.py 填
+     ============================================================ -->
+<section class="slide">
+  <div class="kicker">Top Countries</div>
+  <h2>国家分布（按事件数）</h2>
+  <div class="bars" data-bars="countries_top">
+    <!-- fill_deck.py 按 values.json 的数组生成下面的行 -->
+  </div>
+</section>
+
+<!-- ============================================================
+     示例页 4 · 表格（明细）
+     ============================================================ -->
+<section class="slide">
+  <div class="kicker">Detail</div>
+  <h2>重点事件</h2>
+  <table>
+    <thead><tr><th>日期</th><th>国家</th><th>事件</th><th class="num">死亡</th><th class="num">受伤</th></tr></thead>
+    <tbody data-table="key_events">
+      <!-- fill_deck.py 填这里 -->
+    </tbody>
+  </table>
+</section>
+
+<!-- ============================================================
+     示例页 5 · 口径说明（必须有，不要省）
+     ============================================================ -->
+<section class="slide">
+  <div class="kicker">Method &amp; Caveats</div>
+  <h2>口径与可信度</h2>
+  <table>
+    <tbody>
+      <tr><td>判定标准</td><td>非国家主体 · 有受害对象 · 有伤亡 · 排除私人/索财/事故/反恐战果</td></tr>
+      <tr><td>计数单位</td><td>一次可识别的袭击 = 一条；同一次行动跨地点按行动计</td></tr>
+      <tr><td>伤亡赋值</td><td>有数字取数 · 数十=50/十数=15/数=5 · 提及无数字记 1 · 未提记 0</td></tr>
+      <tr><td>未覆盖</td><td data-v="uncovered">—</td></tr>
+      <tr><td>推定项</td><td data-v="inferred">—</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</div>
+
+<div class="foot">← → 翻页　·　S 索引　·　B 静态</div>
+<div class="pager"><span id="cur">01</span> / <span id="tot">05</span></div>
+<div id="overview"></div>
+
+<!-- DECK_VALUES:BEGIN -->
+<script>
+window.DECK_VALUES = {
+  "events": 3,
+  "deaths": 76,
+  "injuries": 0,
+  "countries": 3,
+  "countries_top": [
+    {
+      "label": "也门",
+      "value": 1
+    },
+    {
+      "label": "尼日利亚",
+      "value": 1
+    },
+    {
+      "label": "刚果（金）",
+      "value": 1
+    }
+  ],
+  "deaths_top": [
+    {
+      "label": "也门",
+      "value": 30
+    },
+    {
+      "label": "尼日利亚",
+      "value": 25
+    },
+    {
+      "label": "刚果（金）",
+      "value": 21
+    }
+  ],
+  "key_events": [
+    {
+      "date": "2026-08-06",
+      "country": "也门",
+      "title": "胡塞武装袭击也门政府军营地，至少 30 名政府军士兵死亡",
+      "deaths": 30,
+      "injuries": 0
+    },
+    {
+      "date": "2026-08-18",
+      "country": "尼日利亚",
+      "title": "高原州社区遇袭，一名地方议员称袭击致 23 人死亡、另有 1 人送医后不治，共 25 人",
+      "deaths": 25,
+      "injuries": 0
+    },
+    {
+      "date": "2026-08-22",
+      "country": "刚果（金）",
+      "title": "反政府武装袭击伊图里省两处村庄，Mabakuha 村至少 10 人死亡、Amani 村寻回 11 具遗体，合计升至 21",
+      "deaths": 21,
+      "injuries": 0
+    }
+  ]
+};
+</script>
+<!-- DECK_VALUES:END -->
+<script>
+/* ============================================================
+   数据与渲染 —— 全部纯本地，无网络依赖
+   ============================================================ */
+(function () {
+  'use strict';
+
+  // 由 fill_deck.py 注入；也可手改
+  window.DECK_VALUES = window.DECK_VALUES || {};
+
+  const slides = Array.from(document.querySelectorAll('.slide'));
+  const total = slides.length;
+  let idx = 0;
+  const ANIM_SEL = '[data-anim]';
+
+  document.getElementById('tot').textContent = String(total).padStart(2, '0');
+
+  // ---- 填数值 ----
+  function fillValues() {
+    const v = window.DECK_VALUES || {};
+    document.querySelectorAll('[data-v]').forEach(el => {
+      const k = el.getAttribute('data-v');
+      if (v[k] !== undefined && v[k] !== null) {
+        el.textContent = typeof v[k] === 'number' ? v[k].toLocaleString('en-US') : v[k];
+      }
+    });
+
+    // 条形
+    document.querySelectorAll('[data-bars]').forEach(box => {
+      const key = box.getAttribute('data-bars');
+      const arr = v[key];
+      if (!Array.isArray(arr) || !arr.length) return;
+      const max = Math.max.apply(null, arr.map(x => +x.value || 0)) || 1;
+      box.innerHTML = arr.map(x => {
+        const pct = Math.max(2, Math.round((+x.value || 0) / max * 100));
+        return '<div class="bar"><span>' + (x.label || '') + '</span>'
+             + '<span class="track"><span class="fill" style="--w:' + pct + '%"></span></span>'
+             + '<b>' + (+x.value || 0).toLocaleString('en-US') + '</b></div>';
+      }).join('');
+    });
+
+    // 表格
+    document.querySelectorAll('[data-table]').forEach(tb => {
+      const key = tb.getAttribute('data-table');
+      const arr = v[key];
+      if (!Array.isArray(arr) || !arr.length) return;
+      tb.innerHTML = arr.map(r => '<tr>'
+        + '<td>' + (r.date || '') + '</td>'
+        + '<td>' + (r.country || '') + '</td>'
+        + '<td>' + (r.title || '') + '</td>'
+        + '<td class="num">' + (r.deaths == null ? '—' : r.deaths) + '</td>'
+        + '<td class="num">' + (r.injuries == null ? '—' : r.injuries) + '</td>'
+        + '</tr>').join('');
+    });
+  }
+
+  // ---- 进入某页时播放该页动效 ----
+  function playIn(el) {
+    el.querySelectorAll(ANIM_SEL).forEach((n, i) => {
+      const d = (i * 70) + 'ms';
+      n.style.transition = 'none';
+      n.style.opacity = '0';
+      n.style.transform = 'translateY(14px)';
+      // 强制 reflow 后再过渡
+      void n.offsetHeight;
+      n.style.transition = 'opacity .5s ease ' + d + ', transform .5s cubic-bezier(.2,0,.38,.9) ' + d;
+      n.style.opacity = '1';
+      n.style.transform = 'translateY(0)';
+    });
+    // 条形生长
+    el.querySelectorAll('.bar .fill').forEach((f, i) => {
+      f.style.width = '0';
+      void f.offsetHeight;
+      f.style.transition = 'width .85s cubic-bezier(.2,0,.38,.9) ' + (120 + i * 60) + 'ms';
+      f.style.width = getComputedStyle(f).getPropertyValue('--w') || '0%';
+    });
+  }
+
+  function go(n) {
+    idx = Math.max(0, Math.min(total - 1, n));
+    slides.forEach((s, i) => s.classList.toggle('on', i === idx));
+    document.getElementById('cur').textContent = String(idx + 1).padStart(2, '0');
+    if (location.hash !== '#p' + (idx + 1)) {
+      history.replaceState(null, '', '#p' + (idx + 1));
+    }
+    const body = document.body;
+    if (!body.classList.contains('low-power')) {
+      playIn(slides[idx]);
+    } else {
+      // 静态：直接落到终态（禁用过渡 + 写死宽度），否则截图为 0 宽
+      slides[idx].querySelectorAll('.bar .fill').forEach(f => {
+        const w = (f.style.getPropertyValue('--w') || '').trim()
+                  || getComputedStyle(f).getPropertyValue('--w').trim();
+        f.style.transition = 'none';
+        f.style.width = w || '100%';
+      });
+      slides[idx].querySelectorAll('[data-anim]').forEach(n => {
+        n.style.transition = 'none';
+        n.style.opacity = '1';
+        n.style.transform = 'none';
+      });
+    }
+  }
+
+  // ---- 缩略图索引 ----
+  const ov = document.getElementById('overview');
+  function buildOverview() {
+    ov.innerHTML = slides.map((s, i) => {
+      const h = s.querySelector('h1,h2,h3');
+      return '<div class="th" data-go="' + i + '"><b>' + String(i + 1).padStart(2, '0')
+           + '</b>' + (h ? h.textContent.trim().slice(0, 34) : '') + '</div>';
+    }).join('');
+    ov.querySelectorAll('.th').forEach(t => {
+      t.onclick = () => { ov.classList.remove('on'); go(+t.getAttribute('data-go')); };
+    });
+  }
+
+  // ---- 键盘 ----
+  document.addEventListener('keydown', e => {
+    const k = e.key;
+    if (k === 'ArrowRight' || k === 'PageDown' || k === ' ') { e.preventDefault(); go(idx + 1); }
+    else if (k === 'ArrowLeft' || k === 'PageUp') { e.preventDefault(); go(idx - 1); }
+    else if (k === 'Home') go(0);
+    else if (k === 'End') go(total - 1);
+    else if (k === 'f' || k === 'F') {
+      if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+      else document.exitFullscreen();
+    }
+    else if (k === 's' || k === 'S') ov.classList.toggle('on');
+    else if (k === 'b' || k === 'B') document.body.classList.toggle('low-power');
+    else if (k === 'Escape') ov.classList.remove('on');
+  });
+
+  // 点击翻页（避开链接）
+  document.getElementById('deck').addEventListener('click', e => {
+    if (e.target.closest('a')) return;
+    if (e.clientX > window.innerWidth * 0.5) go(idx + 1); else go(idx - 1);
+  });
+
+  // 滚轮翻页（节流）
+  let lock = 0;
+  window.addEventListener('wheel', e => {
+    const now = Date.now();
+    if (now - lock < 620) return;
+    if (Math.abs(e.deltaY) < 12) return;
+    lock = now;
+    go(idx + (e.deltaY > 0 ? 1 : -1));
+  }, { passive: true });
+
+  // 触屏
+  let tx = 0;
+  window.addEventListener('touchstart', e => { tx = e.touches[0].clientX; }, { passive: true });
+  window.addEventListener('touchend', e => {
+    const dx = e.changedTouches[0].clientX - tx;
+    if (Math.abs(dx) > 50) go(idx + (dx < 0 ? 1 : -1));
+  }, { passive: true });
+
+  // ---- 静态模式：?static=1 或 #static ----
+  // 无头截图时动画不会跑完，条形会截成 0 宽；人工演示卡顿时也该用这个。
+  const qs = new URLSearchParams(location.search);
+  if (qs.has('static') || /static/.test(location.hash)) {
+    document.body.classList.add('low-power');
+  }
+
+  // ---- 启动 ----
+  fillValues();
+  buildOverview();
+  const m = (location.hash || '').match(/#p(\d+)/);
+  go(m ? +m[1] - 1 : 0);
+})();
+</script>
+</body>
+</html>

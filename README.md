@@ -1,0 +1,123 @@
+# event-ledger-pipeline
+
+事件台账全流程：**核对信源表 → 搜集 → 核验 → 清洗 → 分析 → 产出报告**。
+
+## 这套东西解决什么问题
+
+拿到一份委托方给的「信源监测表」和一批新闻，要做成一份可被追问的事件台账 + 分析报告。
+中间最常见的塌方点：
+
+- 把信源名单当台账用，按等级从上往下取源 → 稳定漏掉事件高发区，而且自己不知道
+- 信检索 API 的日期过滤 → 把别月事件登记成当月
+- 把「渠道不通」写成「未报道」 → 把自己的能力边界说成事实主张
+- 改表格时整列被写成空白 → 全程无报错，所有自检都通过
+- 报告数字与台账差一个 → 两个数都能自圆其说，只有一个对
+- 展示 PPT 带外链 / 溢出 246px → 逐页截图完全看不出
+
+本 skill 把这些都做成**门禁**，不靠「我看了一眼没问题」。
+
+## 六段
+
+| 段 | 做什么 | 门禁 |
+|---|---|---|
+| S0 | 口径先立（定义 / 判定链 / 计数单位 / 伤亡赋值） | 存在两套并存口径 → 停 |
+| S1 | 信源表核对（名单 → 可审计抽样框） | 拿不出「查过/查到/无返回」三列 |
+| S2 | 搜集（六类检索模板 → 候选池） | 没有池内 URL 账 |
+| S3 | 核验（定月份 / 定可核性 / 三种结论） | 渠道不通被写成未报道 |
+| S4 | 清洗（判定 / 去重 / 拆并 / 赋值） | 还有「待定」；加总 ≠ 合计 |
+| S5 | 分析（对账 → 分布 / 结构 / 演进） | 报告数字与台账差一个 |
+| S6 | 交付（报告 + 台账 + 网页 PPT） | 外链 ≠ 0；PPT 数字非台账复算 |
+
+## 开工第一步
+
+```bash
+python scripts/env_check.py
+```
+
+`exit 0` 可以开工；`exit 2` 会逐条给出安装命令。**缺什么就地装，装完重跑确认。**
+
+## 门禁（每个都跑过正负样本）
+
+```bash
+python scripts/env_check.py --ppt                                    # 0 环境齐备 / 2 缺依赖
+python scripts/make_ledger.py --check 台账.xlsx                      # 0 表头==19列 / 2 不符
+python scripts/gate_table_roundtrip.py 改前.xlsx 改后.xlsx --allow "信息来源URL"
+python scripts/gate_date_published.py 候选池.jsonl --month 2026-08
+python scripts/gate_number_drift.py 台账.xlsx --rows 2-30 --expect 790:238
+python scripts/gate_single_file.py 交付/index.html --pages <你的页数>
+```
+
+全部 `0=通过 / 2=有失败 / 1=无法判定`。都支持 `--json`。
+
+几个门禁挡的是真实事故，不是假想问题：
+
+| 门禁 | 挡的是什么 |
+|---|---|
+| `make_ledger --check` | 表头少一个斜杠、括号写成半角 → 交付被退回 |
+| `gate_number_drift` | 空表假通过；「数十人」被算成 0；表内合计写错 100 倍不报 |
+| `gate_date_published` | URL 里是旧日期、正文其实是新月 → 事件记错月份 |
+| `gate_table_roundtrip` | 改表时整列被写成空白，全程无报错 |
+| `gate_single_file` | PPT 带外链，断网演示不了；条形宽度为 0 |
+
+## 三份专项报告
+
+交付主体是三份报告，不是一份汇总数字：
+
+- **遍历性**：每家信源查没查、查到什么（`查过/查到/无返回` 三列）
+- **真实性**：每条事件的原文链接 + 原句 + 链接状态（404 才算死链）
+- **匹配性**：每条事件命中哪条判据、排除了哪几条反证
+
+写法见 [`reference/07-三份专项报告.md`](reference/07-三份专项报告.md)；
+写完按 [`reference/08-写作自查.md`](reference/08-写作自查.md) 改一遍（自带判据，不依赖外部 skill）。
+
+## 用法
+
+把整个目录装到 `~/.agents/skills/` 等位置，或在会话里说：
+「用 event-ledger-pipeline 做这个月的事件台账」。
+
+按段读 `reference/`，不要一次全读。
+
+## 目录
+
+```
+SKILL.md                            主干：六段 + 交付契约 + 门禁一览
+reference/00-口径先立.md             S0  判定链 / 计数单位 / 伤亡赋值
+reference/01-信源表核对.md           S1  名单 -> 可审计抽样框
+reference/02-搜集.md                 S2  检索矩阵 + 检索账
+reference/03-核验.md                 S3  定月份 / 定可核性 / 三种结论
+reference/04-清洗.md                 S4  判定 / 去重 / 拆并 / 赋值
+reference/05-分析.md                 S5  对账 -> 分布 / 结构 / 演进
+reference/06-交付.md                 S6  报告 + 台账 + 网页 PPT
+reference/07-三份专项报告.md         遍历性 / 真实性 / 匹配性 三份报告怎么写
+reference/08-写作自查.md             交付前写作判据（自带，不依赖外部 skill）
+
+assets/templates/报告骨架.md         分析报告骨架
+assets/templates/deck-single-file.html   单文件网页 PPT 起手件（5 页，已过离线门禁）
+
+scripts/env_check.py                 环境自检（--ppt 时把 Chrome 列为必需）
+scripts/make_ledger.py               19 列台账骨架 + --check 表头校验
+scripts/fill_deck.py                 把台账数字填进 PPT（不手抄数字）
+scripts/gate_table_roundtrip.py      改前改后全量逐格对比
+scripts/gate_date_published.py       发布日期确证（meta > URL > 标题）
+scripts/gate_number_drift.py         逐行加总 vs 公布合计
+scripts/gate_single_file.py          单文件离线门禁
+```
+
+## 规模与成本（先说清，别踩坑）
+
+| | 小规模（≤30 条事件） | 完整（整月/整域） |
+|---|---|---|
+| 适用 | 单周、单国、专题、先跑通 | 月度台账、全域覆盖 |
+| S1 | 前 50 家 + 高发国家 | 全名录 |
+| S2 | 逐源点名 10–15 家 + 按周 4 段 | 六类模板全套 |
+| 工时 | 数小时 | 数天 |
+| 代价 | 覆盖不足，**必须在交付说明里声明** | 交付说明里写清规模 |
+
+**默认先跑小规模一遍**，跑通再决定是否扩到完整模式。
+
+## 来源
+
+规则来自一个真实的月度事件台账项目实践：信源名录审计、大规模候选检索、
+按月去重合并、口径从多套收敛到单一套、以及配套的网页 PPT 与离线可视化。
+
+每条踩坑都对应一次真实事故，写在对应 reference 里，不是通用建议。

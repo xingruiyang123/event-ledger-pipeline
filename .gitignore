@@ -1,0 +1,37 @@
+# 测试与临时产物（绝不提交）
+_t/
+_audit/
+_fix*.py
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# 浏览器用户配置（含 History / Login Data / Cookies，绝对不能提交）
+**/chrome-prof/
+**/Default/
+**/Local State
+
+# 真实台账与事件数据（委托项目数据默认不入库）
+*台账*.xlsx
+*.xls
+*候选池*.jsonl
+*核验结果*.xlsx
+*信源分层表*.xlsx
+
+# 例外：examples/ 是公开新闻构成的演示产物，要进仓库
+!examples/*.xlsx
+!examples/*.json
+
+# 交付产物（由使用者的数据生成，不入库）
+交付/
+deck/
+out/
+shots/
+*.before*
+*.bak*
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
