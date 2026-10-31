@@ -105,18 +105,18 @@ def _clean_env():
     return env
 
 
-def download(url, dest, timeout=900):
+def download(url, dest, timeout=180):
     """优先 curl（支持断点续传），没有 curl 用 requests 流式下载。"""
     env = _clean_env()
     if shutil.which("curl"):
-        for attempt in range(1, 6):
+        for attempt in range(1, 4):
             r = subprocess.run(
                 ["curl", "-C", "-", "-L", "--no-progress-meter",
                  "-m", str(timeout), "-o", dest, url],
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 env=env)
             size = os.path.getsize(dest) if os.path.isfile(dest) else 0
-            print("  尝试 %d：已下 %s" % (attempt, _human(size)))
+            print("  尝试 %d/%d：已下 %s" % (attempt, 3, _human(size)), flush=True)
             if r.returncode == 0 and size > 1024:
                 return True, size
         size = os.path.getsize(dest) if os.path.isfile(dest) else 0
@@ -195,7 +195,8 @@ def main():
     ap.add_argument("--version", default=None, help="指定 GED 版本号，如 261")
     ap.add_argument("--check", action="store_true", help="只检查已有文件，不下载")
     ap.add_argument("--list", action="store_true", help="列出可用版本")
-    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--timeout", type=int, default=180,
+                    help="单次下载超时秒数（默认 180，重试 3 次）")
     a = ap.parse_args()
 
     if a.list:
