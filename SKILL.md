@@ -190,7 +190,7 @@ python scripts/env_check.py --ppt                                   # 0 环境 /
 # —— 找全 ——
 python scripts/fetch_ucdp.py --outdir ./数据源                       # 自动探测+下载+校验
 python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jsonl  # 月度首选
-python scripts/judge_events.py --in 候选.jsonl --out 台账数据.json     # 判定链（含「需人工判」）
+python scripts/judge_events.py --in 候选.jsonl --out 台账数据.json \n    --out-keep 对照.json --out-manual 需人判.json                # 判定链（四分类）
 python scripts/harvest_wiki_events.py --month 2026-08 --out 候选.jsonl   # 0 候选够量 / 2 太少
 python scripts/extract_events.py --in 候选.jsonl --out 事件.jsonl         # 结构化抽取
 python scripts/filter_war_context.py --in 事件.jsonl --out 分流.jsonl     # 战争语境分流
