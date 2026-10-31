@@ -52,6 +52,31 @@ python scripts/env_check.py
 python scripts/env_check.py --ppt    # 交付含 PPT 时用这个
 ```
 
+## 或者：一条命令跑通全流程
+
+**你什么都不用准备**（没有数据源、没有候选池、没有台账）：
+
+```bash
+python scripts/run_pipeline.py --month 2026-09 --outdir ./out
+```
+
+它会自动：① 探测并下载 UCDP 数据 → ② 抽该月事件 → ③ 结构化抽取 → ④ 按判定链判定
+→ ⑤ 生成 19 列台账 → ⑥ 跑合理性门禁。
+
+产出在 `./out/`：`01_候选.jsonl`、`02_判定.json`、`02_需人工判.json`、`03_台账.xlsx`。
+
+**实测**：从零开始到 142 条台账，全链路通过。
+
+### 分步跑（想控制每一步时）
+
+```bash
+python scripts/fetch_ucdp.py --outdir ./数据源              # 自动下最新版（断点续传）
+python scripts/harvest_ucdp.py --ged ./数据源/ged261-csv.zip --month 2025-08 --out 候选.jsonl
+python scripts/judge_events.py --in 候选.jsonl --out 台账数据.json --out-manual 需人判.json
+python scripts/make_ledger.py --template 19列 --rows 台账数据.json --out 台账.xlsx
+python scripts/gate_plausibility.py 台账.xlsx --source-kind structured
+```
+
 ## 六段
 
 | 段 | 做什么 | 产物 | 门禁（不过不许进下一段） |
@@ -139,7 +164,9 @@ P 置信度      Q 审核状态    R 关联知识点  S 备注
 python scripts/env_check.py --ppt                                   # 0 环境 / 2 缺依赖
 
 # —— 找全 ——
+python scripts/fetch_ucdp.py --outdir ./数据源                       # 自动探测+下载+校验
 python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jsonl  # 月度首选
+python scripts/judge_events.py --in 候选.jsonl --out 台账数据.json     # 判定链（含「需人工判」）
 python scripts/harvest_wiki_events.py --month 2026-08 --out 候选.jsonl   # 0 候选够量 / 2 太少
 python scripts/extract_events.py --in 候选.jsonl --out 事件.jsonl         # 结构化抽取
 python scripts/filter_war_context.py --in 事件.jsonl --out 分流.jsonl     # 战争语境分流
