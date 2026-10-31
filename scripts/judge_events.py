@@ -70,6 +70,15 @@ INTERSTATE = re.compile(
     r"houthi|saudi|yemen|coalition forces|nato|"
     r"ukrainian armed forces|russian armed forces|israel defense forces|idf)\b"
 )
+# 社区/民族/家族冲突（N1：私人或群体纠纷，不是恐怖主义）
+# 实测踩到：UCDP 把「farmers-herders clash」归入 type=2 单方面暴力，
+# 被当成恐袭计入（尼日利亚 7-01 死 48 那条）。农牧民冲突是社区暴力，不是恐袭。
+COMMUNAL = re.compile(
+    r"(?i)\b(?:farmers?[- ]herders?|herdsmen|communal (?:clash|violence|conflict)|"
+    r"inter-?communal|ethnic (?:clash|violence|conflict)|sectarian (?:clash|violence)|"
+    r"cattle (?:raid|rustl)|land dispute|family (?:feud|dispute|infighting)|"
+    r"clan (?:feud|clash|conflict)|tribal (?:clash|conflict)|vigilante (?:clash|group)|border clash(?:es)?|Oromia|Sidama|Amhara|Benishangul|Afar)\b")
+
 # 事故/灾害（N3）
 ACCIDENT = re.compile(
     r"(?i)\b(?:accident|collision|crash|explosion at a (?:factory|mine)|"
@@ -139,18 +148,75 @@ def judge(rec, min_deaths=1):
     # N3 事故
     if ACCIDENT.search(txt):
         return "不计入", "N3", "疑似事故/非故意事件"
+    # N1 社区/民族/家族冲突
+    if COMMUNAL.search(txt):
+        return "不计入", "N1", "社区/民族/家族冲突（非恐怖主义暴力）"
+
     # N2 犯罪组织
     if "criminal" in kinds:
         return "不计入", "N2", "涉犯罪/贩毒集团（%s vs %s），属以经济目的的帮派暴力" % (a, b)
+    # N4 双方都是武装/恐怖组织互相打（如 JAS vs ISWAP）
+    if ka == "terror" and kb == "terror":
+        return "不计入", "N4", "两个武装/恐怖组织之间交战（%s vs %s）" % (a, b)
+
     # N4 组织间交战
     if t == "3":
         return "不计入", "N4", "非国家武装团体之间交战（%s vs %s）" % (a, b)
     # N4 国家间战争
     if INTERSTATE.search(txt):
         return "不计入", "N4", "国家间战争语境（%s）" % cty
-    # N4 政府 vs 叛乱武装的常规交战（有平民死亡则另判）
-    if "state" in kinds and civ == 0 and t == "1":
-        return "不计入", "N4", "政府与叛乱武装的武装冲突，属交战状态"
+    # type=1 = UCDP 的「国家参与型冲突」（至少一方是政府）。用分方死亡数判实施者：
+    #   UCDP 的 deaths_a/deaths_b 对应 side_a/side_b。政府方有人死 = 非国家方在主动攻击；
+    #   政府方 0 死而对方有人死 = 政府单方面打击（反恐行动 N5 / 交战 N4）。
+    #
+    # 这条先后写错过两次：
+    #   ① 只在 civ==0 时排除 -> 苏丹「政府无人机空袭致 24 平民死」被当恐袭计入；
+    #   ② 改成全部推给「需人工判」-> 724 条里绝大多数其实能自动判，白白压给人工。
+    if t == "1":
+        d_a = rec.get("extra", {}).get("deaths_a")
+        d_b = rec.get("extra", {}).get("deaths_b")
+        try:
+            d_a = int(d_a) if d_a is not None else None
+            d_b = int(d_b) if d_b is not None else None
+        except Exception:  # noqa: BLE001
+            d_a = d_b = None
+
+        # side_a 通常记为政府方；据此换算成「政府方伤亡」与「非国家方伤亡」
+        if ka == "state":
+            gov_loss, ins_loss = d_a, d_b
+        elif kb == "state":
+            gov_loss, ins_loss = d_b, d_a
+        else:
+            gov_loss = ins_loss = None
+
+        # 政府方 0 死、非国家方有死 -> 政府单方面打击，属交战/反恐行动
+        if gov_loss == 0 and (ins_loss or 0) > 0:
+            return "不计入", "N5", (
+                "政府方无人死亡、对方死亡 %s（%s vs %s）：属政府主导的交战/反恐行动"
+                % (ins_loss, a, b))
+
+        # 双方都有死亡 -> 交火，属交战状态
+        if (gov_loss or 0) > 0 and (ins_loss or 0) > 0:
+            return "不计入", "N4", (
+                "双方均有死亡（政府方 %s / 对方 %s，%s vs %s）：属交战状态"
+                % (gov_loss, ins_loss, a, b))
+
+        # 只有政府方有死、对方无死 -> 非国家方单方面袭击政府方/平民
+        if (gov_loss or 0) > 0 and (ins_loss or 0) == 0:
+            if civ > 0:
+                return "计入", "P3+P4", (
+                    "非国家方单方面袭击（政府方死亡 %s），平民死亡 %d（%s vs %s）"
+                    % (gov_loss, civ, a, b))
+            return "计入", "P3", (
+                "非国家方单方面袭击政府方/非战斗人员，死亡 %s（%s vs %s）"
+                % (gov_loss, a, b))
+
+        # 分方死亡数缺失或都为 0 -> 规则判不了，交人
+        if civ > 0:
+            return "需人工判", "-", (
+                "国家参与的冲突致平民死亡 %d，但分方死亡数不足（%s vs %s），需看原文"
+                % (civ, a, b))
+        return "不计入", "兜底", "国家参与的冲突，无伤亡信息（%s vs %s）" % (a, b)
 
     # ===== 步2 正面判据 =====
     # P1：主体属恐怖组织且有实施证据
@@ -221,6 +287,22 @@ def main():
             line = line.strip()
             if line:
                 rows.append(json.loads(line))
+
+    # 先去重：同国 + 同日 + 同死亡数 -> 同一事件被多次记录
+    seen = set()
+    deduped = []
+    for r in rows:
+        # 保守去重：国家+日期+死亡数+地点 都相同才算同一事件。
+        # 只按 国+日+死 会把「同一天同国两起都死1人」误合并（实测去掉 872 条，过激）。
+        key = (r.get("country"), r.get("date"), r.get("deaths"),
+               (r.get("place") or "").strip().lower()[:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(r)
+    if len(deduped) != len(rows):
+        print("去重：%d -> %d 条（同国+同日+同死亡数视为同一事件）" % (len(rows), len(deduped)))
+    rows = deduped
 
     led, exc, man = [], [], []
     reasons = Counter()
