@@ -101,6 +101,8 @@ def main():
     ap.add_argument("--stage", default="all",
                     choices=["harvest", "judge", "ledger", "gate", "all"])
     ap.add_argument("--min-events", type=int, default=40)
+    ap.add_argument("--search-cmd", default=None,
+                    help="补链用的搜索命令模板（{q} 占位）。给了才会补「信息来源URL」")
     ap.add_argument("--source-kind", default="structured",
                     choices=["news", "structured", "mixed"])
     a = ap.parse_args()
@@ -214,6 +216,7 @@ def main():
                               "--in", cand, "--out", ev], allow_fail=True)
         run_step("战争语境分流", [os.path.join(HERE, "filter_war_context.py"),
                                "--in", ev, "--out", sp], allow_fail=True)
+
         run_step("判定（判定链）", [os.path.join(HERE, "judge_events.py"),
                                  "--in", cand, "--out", judged,
                                  "--out-manual", os.path.join(od, "02_需人工判.json")],
@@ -221,6 +224,15 @@ def main():
         print("")
         print("  ℹ️  「需人工判」不是「待定」，是明确的动作：逐条看原文判完写回。")
         print("     判定规则可改：edit scripts/judge_events.py 里的 judge() 函数。")
+
+        # 可选：补「信息来源URL」（UCDP 不给链接，需靠媒体名+标题反查）
+        if a.search_cmd:
+            judged_url = os.path.join(od, "02_判定_带链接.json")
+            run_step("补信息来源URL", [os.path.join(HERE, "enrich_urls.py"),
+                                     "--in", judged, "--out", judged_url,
+                                     "--search-cmd", a.search_cmd], allow_fail=True)
+            if os.path.isfile(judged_url):
+                judged = judged_url
 
     if a.stage in ("judge",):
         return 0
