@@ -27,9 +27,11 @@ except Exception:  # noqa: BLE001
 PY_DEPS = [
     ("openpyxl", "openpyxl", "读写 xlsx 台账", True),
     ("requests", "requests", "抓正文与日期核验", True),
-    ("PIL", "Pillow", "截图/拼图/配色测量", False),
-    ("xlsxwriter", "XlsxWriter", "带格式导出（可选）", False),
-    ("bs4", "beautifulsoup4", "解析 HTML 取 meta", False),
+    # 下面三项当前脚本没有直接 import，标为「可选增强」：
+    # 如果你要扩展（比如做截图比对、复杂 HTML 解析）才需要。
+    ("PIL", "Pillow", "可选：截图/拼图/配色测量（当前脚本未直接使用）", False),
+    ("xlsxwriter", "XlsxWriter", "可选：带格式导出（当前脚本未直接使用）", False),
+    ("bs4", "beautifulsoup4", "可选：解析 HTML（当前脚本未直接使用）", False),
 ]
 
 # ---------- 外部工具：可执行文件候选 / 用途 / 是否必需 ----------
@@ -110,7 +112,9 @@ def main():
     missing_opt = [d for d in pys if not d["ok"] and not d["required"]]
     missing_exe = [e for e in exes if not e["ok"]]
 
-    exit_code = 0 if (py_ok and not missing_req) else 2
+    # --ppt 模式下 Chrome 是必需项；缺了必须 exit 2，否则 agent 会以为环境齐备
+    missing_req_exe = [e for e in exes if e.get("required") and not e["ok"]]
+    exit_code = 0 if (py_ok and not missing_req and not missing_req_exe) else 2
     if not py_ok:
         exit_code = 1
 
@@ -176,8 +180,20 @@ def main():
 
     if a.fix and missing_req:
         pkgs = [d["pip"] for d in missing_req]
+        # 必须清空代理：很多机器设了 HTTP_PROXY 指向没启动的代理，pip 会全部失败，
+        # 而报错看起来像「包不存在」（实测：干净 venv 下 exit 2，加 unset 后 exit 0）
+        env = dict(os.environ)
+        for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+                  "ALL_PROXY", "all_proxy"):
+            env.pop(k, None)
+        env["NO_PROXY"] = "*"
+        env["no_proxy"] = "*"
         print("执行：%s -m pip install %s" % (sys.executable, " ".join(pkgs)))
-        rc = subprocess.call([sys.executable, "-m", "pip", "install"] + pkgs)
+        print("（已清空代理变量，避免未启动的代理导致 pip 失败）")
+        rc = subprocess.call([sys.executable, "-m", "pip", "install"] + pkgs, env=env)
+        if rc != 0:
+            print("pip 失败。若报 ProxyError / 连不上，先手动执行：")
+            print("  unset HTTP_PROXY HTTPS_PROXY   （Windows: set HTTP_PROXY=）")
         print("pip 退出码 = %d，请重跑本脚本确认。" % rc)
 
     return exit_code
