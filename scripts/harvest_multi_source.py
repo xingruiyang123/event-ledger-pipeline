@@ -43,7 +43,7 @@
 ----
   python scripts/harvest_multi_source.py --month 2026-08 --out 候选.jsonl
   python scripts/harvest_multi_source.py --month 2026-08 --out 候选.jsonl \
-      --fetch-cmd "tf.py fetch {url}" --sources ucdp,wiki
+      --fetch-cmd "curl -sL {url}" --sources ucdp,wiki
   python scripts/harvest_multi_source.py --month 2026-08 --list-sources
 
 退出码：0 = 至少一个源有产出且达到下限 | 2 = 全部源都没产出或总量过少 | 1 = 参数错误
