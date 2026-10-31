@@ -70,6 +70,13 @@ INTERSTATE = re.compile(
     r"houthi|saudi|yemen|coalition forces|nato|"
     r"ukrainian armed forces|russian armed forces|israel defense forces|idf)\b"
 )
+
+# 政府军行动的迹象词：出现这些，说明大概率是国家力量在打，不是非国家方袭击
+GOV_ACTION = re.compile(
+    r"(?i)(junta|regime forces|army (?:strike|airstrike|shelling|operation)|"
+    r"airstrike|air strike|drone strike|drone attack|shelling|artillery|"
+    r"military (?:operation|offensive|campaign)|troops (?:kill|raid|shell)|"
+    r"security forces (?:kill|raid)|state forces|government forces)")
 # 社区/民族/家族冲突（N1：私人或群体纠纷，不是恐怖主义）
 # 实测踩到：UCDP 把「farmers-herders clash」归入 type=2 单方面暴力，
 # 被当成恐袭计入（尼日利亚 7-01 死 48 那条）。农牧民冲突是社区暴力，不是恐袭。
@@ -165,13 +172,17 @@ def judge(rec, min_deaths=1):
     # N4 国家间战争
     if INTERSTATE.search(txt):
         return "不计入", "N4", "国家间战争语境（%s）" % cty
-    # type=1 = UCDP 的「国家参与型冲突」（至少一方是政府）。用分方死亡数判实施者：
-    #   UCDP 的 deaths_a/deaths_b 对应 side_a/side_b。政府方有人死 = 非国家方在主动攻击；
-    #   政府方 0 死而对方有人死 = 政府单方面打击（反恐行动 N5 / 交战 N4）。
+    # type=1 = 至少一方是国家/政府的冲突。按「委托方口径」分类，不再一律排除：
     #
-    # 这条先后写错过两次：
-    #   ① 只在 civ==0 时排除 -> 苏丹「政府无人机空袭致 24 平民死」被当恐袭计入；
-    #   ② 改成全部推给「需人工判」-> 724 条里绝大多数其实能自动判，白白压给人工。
+    #   委托方台账的实际做法（从 2026-07 已交付台账提炼）：
+    #     · 尼日尔「ISSP 伏击军事巡逻，16 士兵死」        -> 性质:恐怖袭击（计入）
+    #     · 巴基斯坦「海岸警卫队哨所遭 VBIED+突击」        -> 性质:恐怖袭击（计入）
+    #     · 马里「军方车队遭 JNIM-FLA 伏击」               -> 性质:恐怖袭击（计入）
+    #     · 叙当局「逮捕 IS 关联小组」                     -> 性质:反恐行动（对照，不计入伤亡统计）
+    #     · 摩洛哥「挫败七城市连环图谋」                   -> 性质:反恐行动（对照，不计入）
+    #
+    # 也就是：**非国家方打政府方 = 恐怖袭击；政府方打非国家方 = 反恐行动**。
+    # 这个区分用 UCDP 的 deaths_a / deaths_b 可以自动判，不需要人工。
     if t == "1":
         d_a = rec.get("extra", {}).get("deaths_a")
         d_b = rec.get("extra", {}).get("deaths_b")
@@ -181,7 +192,7 @@ def judge(rec, min_deaths=1):
         except Exception:  # noqa: BLE001
             d_a = d_b = None
 
-        # side_a 通常记为政府方；据此换算成「政府方伤亡」与「非国家方伤亡」
+        # side_a 通常记为政府方，据此换算「政府方伤亡 / 非国家方伤亡」
         if ka == "state":
             gov_loss, ins_loss = d_a, d_b
         elif kb == "state":
@@ -189,34 +200,45 @@ def judge(rec, min_deaths=1):
         else:
             gov_loss = ins_loss = None
 
-        # 政府方 0 死、非国家方有死 -> 政府单方面打击，属交战/反恐行动
+        # A. 政府方 0 死、非国家方有死 -> 政府主导打击 = 反恐行动，保留但单独标性质
         if gov_loss == 0 and (ins_loss or 0) > 0:
-            return "不计入", "N5", (
-                "政府方无人死亡、对方死亡 %s（%s vs %s）：属政府主导的交战/反恐行动"
-                % (ins_loss, a, b))
+            return "保留", "X1", (
+                "政府主导打击（政府方0死/对方死%s），性质=反恐行动，保留作对照、不计入恐袭统计"
+                % ins_loss)
 
-        # 双方都有死亡 -> 交火，属交战状态
-        if (gov_loss or 0) > 0 and (ins_loss or 0) > 0:
-            return "不计入", "N4", (
-                "双方均有死亡（政府方 %s / 对方 %s，%s vs %s）：属交战状态"
-                % (gov_loss, ins_loss, a, b))
-
-        # 只有政府方有死、对方无死 -> 非国家方单方面袭击政府方/平民
+        # B. 非国家方单方面袭击政府方（政府方有死、对方无死）= 恐怖袭击
         if (gov_loss or 0) > 0 and (ins_loss or 0) == 0:
             if civ > 0:
-                return "计入", "P3+P4", (
-                    "非国家方单方面袭击（政府方死亡 %s），平民死亡 %d（%s vs %s）"
+                return "计入", "P5+P4", (
+                    "非国家方袭击政府/军警目标致政府方死%s，并伤及平民%d（%s vs %s）"
                     % (gov_loss, civ, a, b))
-            return "计入", "P3", (
-                "非国家方单方面袭击政府方/非战斗人员，死亡 %s（%s vs %s）"
+            return "计入", "P5", (
+                "非国家方袭击政府/军警目标（检查站/哨所/巡逻队/基地），政府方死%s（%s vs %s）"
                 % (gov_loss, a, b))
 
-        # 分方死亡数缺失或都为 0 -> 规则判不了，交人
+        # C. 双方都有死 = 交火/交战，保留但标性质
+        if (gov_loss or 0) > 0 and (ins_loss or 0) > 0:
+            return "保留", "X2", (
+                "双方交火（政府方%s/对方%s），性质=交战，保留作对照、不计入统计"
+                % (gov_loss, ins_loss))
+
+        # D. 分方死亡都是 0、只有平民死 -> 判不了是谁干的，不能算恐袭。
+        #
+        # 实测踩坑：缅甸「Junta Drone Attack Kills Two Civilians」、
+        # 苏丹「Sudanese army drone strike kills civilians」这类条目，
+        # deaths_a=0 且 deaths_b=0（双方战斗人员都没死、只有平民死），
+        # side_a 却是「Government of Myanmar/Sudan」—— 这是政府军杀平民（国家暴力），
+        # 早前版本落到下面「有平民死亡就计入 P4」，把政府军空袭算成了恐怖袭击。
         if civ > 0:
+            if GOV_ACTION.search(txt):
+                return "保留", "X1", (
+                    "疑似国家力量行动致平民死亡 %d（%s）：性质=国家暴力，保留作对照、不计入"
+                    % (civ, a))
             return "需人工判", "-", (
-                "国家参与的冲突致平民死亡 %d，但分方死亡数不足（%s vs %s），需看原文"
+                "平民死亡 %d 但分方死亡均为 0、实施方不明（%s vs %s），需看原文"
                 % (civ, a, b))
-        return "不计入", "兜底", "国家参与的冲突，无伤亡信息（%s vs %s）" % (a, b)
+        return "需人工判", "-", "国家参与的冲突但分方死亡缺失（%s vs %s）" % (a, b)
+
 
     # ===== 步2 正面判据 =====
     # P1：主体属恐怖组织且有实施证据
@@ -301,6 +323,7 @@ def main():
     ap.add_argument("--out", dest="out", default=None, help="计入的台账数据（json 数组）")
     ap.add_argument("--out-excluded", default=None, help="不计入的（json 数组）")
     ap.add_argument("--out-manual", default=None, help="需人工判的（json 数组）")
+    ap.add_argument("--out-keep", default=None, help="保留作对照的（反恐行动/交战，不计入统计）")
     ap.add_argument("--min-deaths", type=int, default=1,
                     help="计入的最低死亡数（默认 1；口径要求死亡≥1 或受伤≥3）")
     ap.add_argument("--json", action="store_true")
@@ -329,13 +352,16 @@ def main():
         print("去重：%d -> %d 条（同国+同日+同死亡数视为同一事件）" % (len(rows), len(deduped)))
     rows = deduped
 
-    led, exc, man = [], [], []
+    led, exc, man, keep = [], [], [], []   # keep=保留作对照（反恐行动/交战），不计入统计
     reasons = Counter()
     for r in rows:
         v, chain, note = judge(r, a.min_deaths)
         row = to_row(r, v, chain, note)
         if v == "计入":
             led.append(row)
+        elif v == "保留":
+            row["备注"] = "[对照]%s ｜ %s" % (note, row.get("备注", ""))
+            keep.append(row)
         elif v == "需人工判":
             man.append(row)
         else:
@@ -350,13 +376,15 @@ def main():
     dump(a.out, led)
     dump(a.out_excluded, exc)
     dump(a.out_manual, man)
+    dump(a.out_keep, keep)
 
     exit_code = 0 if led else 2
 
     if a.json:
         print(json.dumps({
             "in": a.inp, "total": len(rows),
-            "included": len(led), "excluded": len(exc), "manual": len(man),
+            "included": len(led), "excluded": len(exc),
+            "manual": len(man), "keep_as_control": len(keep),
             "reasons": dict(reasons), "exit": exit_code,
         }, ensure_ascii=False, indent=2))
         return exit_code
@@ -368,6 +396,7 @@ def main():
     print("计入      : %d 条" % len(led))
     print("不计入    : %d 条" % len(exc))
     print("需人工判  : %d 条" % len(man))
+    print("保留作对照: %d 条（反恐行动/交战，不计入恐袭统计）" % len(keep))
     print()
     print("-- 判定链落点分布 ------------------------------------------------")
     for k, v in reasons.most_common():
@@ -379,7 +408,8 @@ def main():
         for k, v in ctys.most_common(15):
             print("  %-18s %4d" % (k, v))
         print()
-        print("-- 死亡合计：%d" % sum(r["死亡人数"] for r in led))
+        print("-- 死亡合计：%d（仅统计「计入」类，不含保留作对照的 %d 条）"
+              % (sum(r["死亡人数"] for r in led), len(keep)))
         print()
 
     if not led:
