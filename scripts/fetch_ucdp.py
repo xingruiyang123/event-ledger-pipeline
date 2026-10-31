@@ -232,10 +232,20 @@ def main():
             print("无法探测候选集文件名。请手动下载：")
             print("  https://ucdp.uu.se/downloads/  → Candidate datasets")
             return 2
-        # 优先选「月度候选集」：命名最短的那个（专项包带长日期段，如 _1101_2512）
-        fn = sorted(cf, key=len)[0]
+        # 关键：候选集有两种形态，选错会导致「某月只有几十条」的假象。
+        #
+        #   GEDEvent_v26_0_9.csv       1.6MB  —— 只含「最新在编月份」
+        #   GEDEvent_v26_01_26_09.csv   13MB  —— **累计版**，含该年 01 到 09 全月
+        #
+        # 实测：用前者查 2026-08 只有 27 条；用后者 1860 条。
+        # 所以优先选「文件名带日期区间」的累计版；没有就用最大的那个。
+        def _score(name):
+            # 形如 _01_26_09 / _1101_2512 的是累计/专项包，优先
+            has_range = 1 if re.search(r"_\d{2,4}_\d{2,4}", name) else 0
+            return (has_range, len(name))
+        fn = sorted(cf, key=_score, reverse=True)[0]
         print("候选集可选：%s" % ", ".join(cf))
-        print("选用：%s" % fn)
+        print("选用：%s（优先累计版，它覆盖多个月份）" % fn)
         dest = os.path.join(a.outdir, fn)
         if os.path.isfile(dest) and verify(dest)[0]:
             print("已存在且校验通过：%s" % dest)
