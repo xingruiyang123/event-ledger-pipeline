@@ -242,6 +242,30 @@ def judge(rec, min_deaths=1):
     return "需人工判", "-", "有死亡（%d）但行为体性质与动作类型均判不出来，需人工看原文" % deaths
 
 
+def _src_hint(rec):
+    """从 UCDP 记录里拼出「媒体名 + 标题」，给补链接脚本用。"""
+    ex = rec.get("extra", {}) or {}
+    office = (ex.get("source_office") or "").split(";")[0].strip()
+    hl = (ex.get("source_headline") or "").strip()
+    if ";" in hl:
+        hl = hl.split(";")[0].strip()
+    if "|" in hl:
+        hl = re.split(r"[|｜]", hl)[-1].strip()
+    if not office or not hl:
+        art = (rec.get("source_citation") or ex.get("source_citation") or "").strip().strip('"')
+        parts = [p.strip().strip('"') for p in art.split(",")]
+        if len(parts) >= 3:
+            office = office or parts[0]
+            if not hl:
+                hl = parts[-1]
+                if ";" in hl:
+                    hl = hl.split(";")[0].strip()
+                if "|" in hl:
+                    hl = re.split(r"[|｜]", hl)[-1].strip()
+    hint = ("%s %s" % (office, hl)).strip()[:70]
+    return hint or "无来源线索"
+
+
 def to_row(rec, verdict, chain, note):
     d = rec.get("date") or ""
     try:
@@ -266,7 +290,8 @@ def to_row(rec, verdict, chain, note):
         "置信度": "A" if ns >= 2 else "B",
         "审核状态": "已确认" if verdict == "计入" else ("待审核" if verdict == "需人工判" else "已退回"),
         "关联知识点": chain,
-        "备注": "[判定]%s" % note,
+        # 备注里带上「媒体名 + 标题」：UCDP 不给 URL，后续 enrich_urls 靠这个反查
+        "备注": "[判定]%s ｜ [src]%s" % (note, _src_hint(rec)),
     }
 
 
