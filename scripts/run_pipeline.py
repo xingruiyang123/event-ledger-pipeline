@@ -20,7 +20,7 @@
   python scripts/run_pipeline.py --month 2026-09 --ucdp-candidate GEDEvent_v26.csv --outdir ./out
 
   # 没有 UCDP，用维基兜底（条数会少，脚本会明确警告）
-  python scripts/run_pipeline.py --month 2026-08 --wiki-only --fetch-cmd "tf.py fetch {url}" --outdir ./out
+  python scripts/run_pipeline.py --month 2026-08 --wiki-only --fetch-cmd "curl -sL {url}" --outdir ./out
 
   # 只跑前几步看看数据够不够，不出台账
   python scripts/run_pipeline.py --month 2025-08 --ucdp ged261.zip --stage harvest
@@ -44,13 +44,25 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PY = sys.executable
 
 
+def _clean_env():
+    """清空代理变量。很多机器设了 HTTP_PROXY 指向没启动的代理，
+    子进程会全部连不上，看起来像断网。必须显式清空。"""
+    env = dict(os.environ)
+    for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+              "ALL_PROXY", "all_proxy"):
+        env.pop(k, None)
+    env["NO_PROXY"] = "*"
+    env["no_proxy"] = "*"
+    return env
+
+
 def run_step(name, args, expect=0, allow_fail=False):
     """跑一步，返回 (ok, 输出)。"""
     print("\n" + "─" * 70)
     print("▶ %s" % name)
     print("─" * 70)
     r = subprocess.run([PY] + args, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+                       encoding="utf-8", errors="replace", env=_clean_env())
     out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
     # 只打印关键行，避免刷屏
     for line in out.split("\n"):
@@ -86,6 +98,31 @@ def main():
     ledger = os.path.join(od, "03_台账.xlsx")
 
     results = []
+
+    # ============ 阶段 0：数据源（缺就自动下）============
+    if a.stage in ("harvest", "all") and not a.wiki_only:
+        have = None
+        if a.ucdp and os.path.isfile(a.ucdp):
+            have = a.ucdp
+        elif a.ucdp_candidate and os.path.isfile(a.ucdp_candidate):
+            have = a.ucdp_candidate
+        if not have:
+            print("\n未提供可用的 UCDP 文件，尝试自动下载候选集（1.6MB，轻量）…")
+            ds = os.path.join(od, "数据源")
+            ok, out = run_step("自动获取数据源",
+                               [os.path.join(HERE, "fetch_ucdp.py"),
+                                "--candidate", "--outdir", ds], allow_fail=True)
+            if ok:
+                import glob as _g
+                got = sorted(_g.glob(os.path.join(ds, "*.csv")))
+                if got:
+                    a.ucdp_candidate = got[0]
+                    print("  已获取：%s" % got[0])
+            if not a.ucdp_candidate:
+                print("\n  ⚠️  自动获取失败。处置：")
+                print("     1) 手动下载 https://ucdp.uu.se/downloads/ 的候选集或正式 GED")
+                print("     2) 用 --ucdp <文件> 指定")
+                print("     3) 或改用 --wiki-only 走维基兜底（条数会少）")
 
     # ============ 阶段 1：采集 ============
     if a.stage in ("harvest", "all"):
@@ -128,9 +165,13 @@ def main():
                               "--in", cand, "--out", ev], allow_fail=True)
         run_step("战争语境分流", [os.path.join(HERE, "filter_war_context.py"),
                                "--in", ev, "--out", sp], allow_fail=True)
-        # 判定由 build 脚本做（本脚本不含业务判定逻辑，避免把口径写死在工具里）
-        print("\n  ℹ️  判定需按 reference/00-口径先立.md 逐条做。")
-        print("     可用你自己的判定脚本；本脚本不内置口径（口径随委托方变）。")
+        run_step("判定（判定链）", [os.path.join(HERE, "judge_events.py"),
+                                 "--in", cand, "--out", judged,
+                                 "--out-manual", os.path.join(od, "02_需人工判.json")],
+                 allow_fail=True)
+        print("")
+        print("  ℹ️  「需人工判」不是「待定」，是明确的动作：逐条看原文判完写回。")
+        print("     判定规则可改：edit scripts/judge_events.py 里的 judge() 函数。")
 
     if a.stage in ("judge",):
         return 0
