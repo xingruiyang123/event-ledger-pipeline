@@ -149,6 +149,10 @@ def main():
     ap.add_argument("--reference-label", default="外部参照", help="参照来源名称")
     ap.add_argument("--min-coverage", type=float, default=0.15,
                     help="相对参照总量的最低覆盖率（默认 0.15）")
+    ap.add_argument("--source-kind", default="news",
+                    choices=["news", "structured", "mixed"],
+                    help="数据源类型：news=新闻检索（零值国家高度可疑）；"
+                         "structured=UCDP/ACLED 等结构化库（零值多为源覆盖薄）；mixed=混合")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
@@ -198,9 +202,16 @@ def main():
     warning = [(c, g, nd) for c, g, nd in hollow if g > 0]
 
     if critical:
-        fails.append("以下高发国家本月 0 条：%s —— 这些国家每月都有成规模的武装袭击报道，"
-                     "0 条几乎必然是漏检。"
-                     % "、".join("%s(应≥%d)" % (c, nd) for c, g, nd in critical[:8]))
+        msg = ("以下高发国家本月 0 条：%s —— 这些国家每月都有成规模的武装袭击报道"
+               % "、".join("%s(应≥%d)" % (c, nd) for c, g, nd in critical[:8]))
+        if a.source_kind == "news":
+            fails.append(msg + "，0 条几乎必然是漏检。")
+        elif a.source_kind == "structured":
+            # 结构化库的零值通常是「该库对这类事件不收」而不是「检索漏了」
+            warns.append(msg + "。但本次用的是结构化库（UCDP/ACLED），"
+                        "零值更可能是该库覆盖薄，而非检索漏检 —— 需在交付说明里写清。")
+        else:
+            warns.append(msg + "。混合源下需人工确认是漏检还是源覆盖薄。")
     if warning:
         warns.append("以下高发国家明显偏低：%s"
                      % "、".join("%s %d条/应≥%d" % (c, g, nd) for c, g, nd in warning[:8]))
@@ -210,10 +221,12 @@ def main():
     if a.reference_total:
         coverage = n / float(a.reference_total)
         if coverage < a.min_coverage:
-            fails.append("覆盖率过低：台账 %d 条 / %s %d 条 = %.1f%%（下限 %.0f%%）。"
-                         "两者口径可能不同（如『安全事件』含非恐袭），但差这么多必须先解释清楚。"
+            note = ""
+            if a.source_kind == "structured":
+                note = "（结构化库只收「有组织武装冲突」，口径天然小于「安全事件」，偏低是正常的）"
+            fails.append("覆盖率过低：台账 %d 条 / %s %d 条 = %.1f%%（下限 %.0f%%）%s。"
                          % (n, a.reference_label, a.reference_total,
-                            coverage * 100, a.min_coverage * 100))
+                            coverage * 100, a.min_coverage * 100, note))
 
     exit_code = 0 if not fails else 2
 
