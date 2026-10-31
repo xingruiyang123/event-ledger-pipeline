@@ -93,10 +93,20 @@ STATE_HINT = re.compile(
 
 
 def month_pages(month):
+    """按 --month 的年份生成页面名，并按大小月决定天数。
+
+    原实现把年份写死成 2026，查 2025-08 也在抓 2026 年的页面；
+    且用 range(1,32) 不判大小月，2 月会多抓 2/29-2/31 三个不存在的页面。
+    """
+    import calendar
     y, m = month.split("-")
-    return [("2026_%s_%d" % (MONTHS[m], d),
-             "https://en.wikipedia.org/wiki/Portal:Current_events/2026_%s_%d"
-             % (MONTHS[m], d)) for d in range(1, 32)]
+    try:
+        ndays = calendar.monthrange(int(y), int(m))[1]
+    except Exception:  # noqa: BLE001
+        ndays = 31
+    return [("%s_%s_%d" % (y, MONTHS[m], d),
+             "https://en.wikipedia.org/wiki/Portal:Current_events/%s_%s_%d"
+             % (y, MONTHS[m], d)) for d in range(1, ndays + 1)]
 
 
 def _clean_urls(name):
