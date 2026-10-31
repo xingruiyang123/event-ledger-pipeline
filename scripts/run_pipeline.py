@@ -56,13 +56,27 @@ def _clean_env():
     return env
 
 
-def run_step(name, args, expect=0, allow_fail=False):
+def run_step(name, args, expect=0, allow_fail=False, timeout=600):
     """跑一步，返回 (ok, 输出)。"""
     print("\n" + "─" * 70)
     print("▶ %s" % name)
     print("─" * 70)
-    r = subprocess.run([PY] + args, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", env=_clean_env())
+    import time as _t
+    _t0 = _t.time()
+    print("  （执行中…）", flush=True)
+    try:
+        r = subprocess.run([PY] + args, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", env=_clean_env(),
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print("  ✗ 超时（%d 秒）。处置：加 --timeout 放宽，或缩小数据量" % timeout)
+        class _R:
+            returncode = 124
+            stdout = ""
+            stderr = ""
+        r = _R()
+    _dt = _t.time() - _t0
+    print("  （耗时 %.1f 秒）" % _dt, flush=True)
     out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
     # 只打印关键行，避免刷屏
     for line in out.split("\n"):
@@ -132,14 +146,25 @@ def main():
             args += (["--ged", a.ucdp] if a.ucdp else ["--candidate", a.ucdp_candidate])
             ok, out = run_step("采集：UCDP", args, expect=0, allow_fail=True)
             results.append(("采集(UCDP)", ok, out))
-            if not ok:
+        # 采集失败必须立即停：否则 0 条候选会一路空转到底，
+        # 最后只报「找不到判定结果」，让人以为是自己少跑了某步。
+        if not ok:
+            print("")
+            print("  采集失败，流水线终止。上面的诊断已说明原因。")
+            print("  全链路结果：")
+            for _n, _o, _ in results:
+                print("    %-18s %s" % (_n, "✅" if _o else "❌"))
+            return 2
+        if not ok:
                 # 典型误用：拿候选集查历史月份
                 if "候选集" in out and "历史月份" in out:
                     print("\n  ⚠️  诊断：你可能用候选集查了历史月份。")
                     print("     候选集只保留还在编码队列的月份；历史月份必须用正式 GED。")
                 elif "未收录" in out:
                     print("\n  ⚠️  诊断：该月可能确实未收录（GED 滞后约一年）。")
-        else:
+        elif a.wiki_only or not (a.ucdp or a.ucdp_candidate):
+            # 只有「明确要求维基」或「完全没有 UCDP 文件」时才走维基兜底。
+            # 实测：UCDP 已成功采到 1984 条后仍去跑维基，白耗 295 秒。
             args = [os.path.join(HERE, "harvest_wiki_events.py"), "--month", a.month,
                     "--out", cand, "--min-items", str(a.min_events)]
             if a.fetch_cmd:
@@ -149,6 +174,30 @@ def main():
             results.append(("采集(维基)", ok, out))
             print("\n  ⚠️  提醒：维基偏欧美，非洲小规模袭击几乎不进。")
             print("     用它做月度台账会系统性偏斜，交付说明里必须写清。")
+
+        # 采集后必须校验：0 条候选不许继续往下跑
+        # 实测：候选集只有 2026-09，查 2025-08 会命中 0 条，
+        # 但流水线一路空转到底，最后只报「找不到判定结果」，让人以为是自己的问题。
+        ncand = 0
+        if os.path.isfile(cand):
+            with open(cand, encoding="utf-8") as _f:
+                ncand = sum(1 for _l in _f if _l.strip())
+        if ncand == 0:
+            print("")
+            print("  ✗ 采集到 0 条候选，流水线终止。")
+            print("    常见原因：")
+            print("    1) 用候选集查了历史月份 —— 候选集只含在编月份")
+            print("       处置：改用正式 GED（--ucdp ged261-csv.zip）")
+            print("    2) 该月确实未被数据源收录（UCDP 正式版滞后约一年）")
+            print("       处置：换一个已收录的月份，或接 ACLED")
+            print("    3) 网络/代理问题导致下载不完整")
+            print("       处置：python scripts/fetch_ucdp.py --check --outdir ./数据源")
+            print("")
+            print("  全链路结果：")
+            for _n, _o, _ in results:
+                print("    %-18s %s" % (_n, "✅" if _o else "❌"))
+            return 2
+        print("  候选文件：%d 条" % ncand)
 
         if a.stage == "harvest":
             return 0
@@ -198,6 +247,35 @@ def main():
             if not ok:
                 print("\n  ⚠️  量级门禁未通过。不要直接交付 ——")
                 print("     先补数据源（换正式 GED / 接 ACLED / 逐国点名本地媒体）。")
+
+    # ============ 阶段 5：三份报告 + PPT ============
+    if a.stage in ("gate", "all") and os.path.isfile(ledger):
+        repdir = os.path.join(od, "报告")
+        run_step("生成三份专项报告",
+                 [os.path.join(HERE, "make_reports.py"),
+                  "--ledger", ledger,
+                  "--candidates", cand,
+                  "--excluded", os.path.join(od, "02b_排除.json"),
+                  "--manual", os.path.join(od, "02_需人工判.json"),
+                  "--month", a.month, "--outdir", repdir],
+                 allow_fail=True)
+
+        deck = os.path.join(od, "index.html")
+        tpl = os.path.join(os.path.dirname(HERE), "assets", "templates",
+                           "deck-single-file.html")
+        if os.path.isfile(tpl):
+            import shutil as _sh
+            _sh.copy(tpl, deck)
+            run_step("生成 PPT",
+                     [os.path.join(HERE, "fill_deck.py"), "--deck", deck,
+                      "--from-ledger", ledger, "--out", deck], allow_fail=True)
+            run_step("门禁：PPT 离线",
+                     [os.path.join(HERE, "gate_single_file.py"), deck],
+                     allow_fail=True)
+
+        run_step("门禁：数字对账",
+                 [os.path.join(HERE, "gate_number_drift.py"), ledger],
+                 allow_fail=True)
 
     print("\n" + "=" * 70)
     print(" 全链路结果")
