@@ -44,6 +44,12 @@ python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jso
 >
 > `fetch_ucdp.py` 会自动优先选累计版。手动下载时务必看清文件名有没有日期区间。
 >
+> ⚠️ **UCDP 的 49 个字段里没有 URL**，`source_article` 是「媒体名,日期,标题」的引用串。
+> 所以从 UCDP 出的台账，`信息来源URL` 列是空的 —— 必须补链才算"可核"。
+> 补链用 `scripts/enrich_urls.py`，但实测覆盖率只有约 **9%**：它的标题常是片段
+> （`Two people`、`A soldier`），且大量引用本地语言媒体（葡语/法语/阿拉伯语），
+> 用英文标题搜不到。**补不到的要如实留空并标注，不许填一条假链接。**
+>
 > **两个数据集合起来的时间覆盖**：
 > 正式 GED（1989→去年）+ 累计候选集（今年 01→最近月）= **1989 至今，只差最近一个月左右**。
 
@@ -90,6 +96,7 @@ python scripts/run_pipeline.py --month 2026-09 --outdir ./out
 python scripts/fetch_ucdp.py --outdir ./数据源              # 自动下最新版（断点续传）
 python scripts/harvest_ucdp.py --ged ./数据源/ged261-csv.zip --month 2025-08 --out 候选.jsonl
 python scripts/judge_events.py --in 候选.jsonl --out 台账数据.json --out-manual 需人判.json
+python scripts/enrich_urls.py --in 台账数据.json --out 带链接.json --search-cmd '<你的搜索命令> {q}'        # 补「信息来源URL」
 python scripts/make_ledger.py --template 19列 --rows 台账数据.json --out 台账.xlsx
 python scripts/gate_plausibility.py 台账.xlsx --source-kind structured
 ```
