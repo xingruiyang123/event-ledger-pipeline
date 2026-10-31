@@ -158,9 +158,16 @@ def one(session, rec, month, do_fetch, timeout):
     diag = {}
     alt = []          # 备选日期来源，用于冲突检测
 
+    # 结构化源（UCDP/ACLED）本身带 date 字段，且是「事发日」——
+    # 比 URL / 标题 / 网页 meta 都可靠，优先级最高。
+    # 不加这一段的话，UCDP 候选会全部落「无法判定」（实测 1984 条全部 unknown）。
+    d0 = str(rec.get("date") or "").strip()
+    if re.match(r"^\d{4}-\d{2}", d0):
+        got, how = d0[:7], "record:date"
+
     # 顺序严格按 reference/03-核验.md：meta / JSON-LD  >  URL 内嵌  >  标题。
     # 原实现是 URL > 标题 > meta，会把「URL 里是旧日期、正文其实是新月」的稿子漏放。
-    if do_fetch and url:
+    if not got and do_fetch and url:
         html, diag = fetch(session, url, timeout)
         if html:
             got, how, raw = date_from_html(html)
