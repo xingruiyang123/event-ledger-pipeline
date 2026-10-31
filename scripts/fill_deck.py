@@ -182,13 +182,29 @@ def load_values(path):
     return d
 
 
+def _sanitize(obj):
+    """递归清理字符串里的控制字符（换行/制表/不可见字符）。
+
+    真实事故：事件摘要里带换行，json.dumps 会保留成裸控制字符，
+    注入后 JSON.parse 报 "Invalid control character"，页面直接空白。
+    """
+    CTRL = "".join(chr(c) for c in list(range(0, 32)) + [127])
+    if isinstance(obj, str):
+        return obj.translate({ord(c): " " for c in CTRL}).strip()
+    if isinstance(obj, list):
+        return [_sanitize(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize(v) for k, v in obj.items()}
+    return obj
+
+
 def inject(html, values):
     """把 values 注入为 window.DECK_VALUES。已有则替换，没有则插在 </body> 前。
 
     必须用唯一标记包裹：模板内部本来就有 `window.DECK_VALUES = window.DECK_VALUES || {}`
     这类普通赋值，裸正则会把它一起吞掉，页面直接崩。
     """
-    payload = json.dumps(values, ensure_ascii=False, indent=2)
+    payload = json.dumps(_sanitize(values), ensure_ascii=False, indent=2)
     block = (MARK_BEGIN + chr(10)
              + "<script>" + chr(10) + "window.DECK_VALUES = " + payload + ";" + chr(10)
              + "</scr" + "ipt>" + chr(10)
@@ -234,30 +250,65 @@ def main():
     new_html, how = inject(html, values)
 
     # 自校验：注入块必须能解析，且关键键在位
-    m = re.search(re.escape(MARK_BEGIN) + r"\s*<script>\s*window\.DECK_VALUES\s*=\s*"
-                  r"([\s\S]*?);\s*</scr" + "ipt>", new_html)
-    ok, problems = True, []
-    if not m:
+    # 只在 marker 块内找，并用「括号配平」提取完整 JSON 对象。
+    # 不能用非贪婪正则：JSON 里有嵌套数组/对象，正则会提前截断，导致误报「缺键」。
+    m = re.search(re.escape(MARK_BEGIN) + r"([\s\S]*?)" + re.escape(MARK_END), new_html)
+    inner = m.group(1) if m else ""
+    back, problems = {}, []
+    ok = True
+
+    def extract_json_obj(text):
+        k = text.find("window.DECK_VALUES")
+        if k < 0:
+            return None
+        k = text.find("{", k)
+        if k < 0:
+            return None
+        depth, instr, esc = 0, False, False
+        for idx in range(k, len(text)):
+            ch = text[idx]
+            if instr:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    instr = False
+                continue
+            if ch == '"':
+                instr = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[k:idx + 1]
+        return None
+
+    raw = extract_json_obj(inner)
+    if not raw:
         ok = False
-        problems.append("注入后找不到 DECK_VALUES 块")
+        problems.append("注入后找不到完整的 DECK_VALUES JSON 对象")
     else:
         try:
-            back = json.loads(m.group(1))
+            back = json.loads(raw)
         except Exception as e:  # noqa: BLE001
             ok = False
             problems.append("注入块不是合法 JSON：%s" % e)
             back = {}
-        for k in DEFAULT_KEYS:
-            if back.get(k) in (None, ""):
-                problems.append("缺关键键：%s（页面上会显示 —）" % k)
-        if not back.get("countries_top") and not back.get("deaths_top"):
-            problems.append("缺 countries_top / deaths_top（条形图会是空的）")
-        if not back.get("key_events"):
-            problems.append("缺 key_events（明细表会是空的）")
+
+    for key in DEFAULT_KEYS:
+        if back.get(key) in (None, ""):
+            problems.append("缺关键键：%s（页面上会显示 —）" % key)
+    if not back.get("countries_top") and not back.get("deaths_top"):
+        problems.append("缺 countries_top / deaths_top（条形图会是空的）")
+    if not back.get("key_events"):
+        problems.append("缺 key_events（明细表会是空的）")
 
     # 顺带检查外链（避免填完就出离线问题）
     remote = re.findall(r'(?i)(?:src|href)\s*=\s*["\'](?:https?:)?//', new_html)
 
+    # ---- 写盘 ----
     if not a.dry_run:
         out = a.out or a.deck
         try:
