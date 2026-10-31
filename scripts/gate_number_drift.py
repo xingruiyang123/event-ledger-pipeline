@@ -62,6 +62,19 @@ MENTION_ONLY = ["不详", "未知", "不明", "多", "若干", "several people",
 ZERO_OK = ["", "-", "—", "–", "0", "无", "无人员死亡", "none", "n/a", "na", "null"]
 
 
+# 「未披露」类标记：不是「0 伤亡」，而是「不知道」，不能计入合计，也不能判成错。
+# 实测：真实台账 34 行里有 16 个单元格是「未披露」「未确认」「无直接伤亡」，
+# 早前版本一律判失败，等于把「如实标注」判成了错误。
+UNKNOWN_TOKENS = {"未披露", "未确认", "无直接伤亡", "不明", "未知", "不详",
+                  "无数据", "未统计", "待核实", "—", "-", "－", "/", "N/A", "n/a"}
+
+
+def is_unknown(v):
+    if v is None:
+        return True
+    return str(v).strip() in UNKNOWN_TOKENS
+
+
 def to_num(v, strict=True):
     """把单元格转成整数。返回 (数值, 诊断)。
 
@@ -80,6 +93,9 @@ def to_num(v, strict=True):
         return int(v), "ok"
 
     s = str(v).strip()
+    # 「未披露/未确认」不是 0，也不是错 —— 单独归为 unknown，不计入合计
+    if s in UNKNOWN_TOKENS:
+        return 0, "unknown"
     low = s.lower().replace(",", "").replace("，", "")
     if low in ZERO_OK:
         return 0, "zero"
@@ -225,6 +241,12 @@ def main():
                      "多半是伤亡列没赋值或抽取失败" % len(rows))
 
     # ---- A2. 解析失败断言：解析不了的值不许静默当 0 ----
+    # unknown（未披露/未确认）单独统计，不判失败：如实标注比填 0 更诚实
+    unk = [x["row"] for x in rows if "unknown" in (x["kind_d"], x["kind_i"])]
+    if unk:
+        warns.append("有 %d 行的伤亡标为「未披露/未确认」，不计入合计（这是如实标注，非错误）"
+                     % len(unk))
+
     bad_cells = [(x["row"], x["raw_deaths"], "死亡") for x in rows if x["kind_d"] == "bad"]
     bad_cells += [(x["row"], x["raw_inj"], "受伤") for x in rows if x["kind_i"] == "bad"]
     if bad_cells:
