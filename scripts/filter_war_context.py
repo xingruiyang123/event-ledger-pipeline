@@ -91,7 +91,8 @@ STATE_OP = re.compile(
 
 
 def classify(rec):
-    text = rec.get("text") or ""
+    # UCDP 候选只有 summary 没有 text，两个都要认，否则整池抽取为空
+    text = rec.get("text") or rec.get("summary") or ""
     cty = rec.get("country_canon") or ""
 
     war_hit = None
@@ -131,9 +132,13 @@ def main():
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
+    print("读取 %s …" % a.inp, flush=True)
     rows = [json.loads(l) for l in open(a.inp, encoding="utf-8") if l.strip()]
+    print("共 %d 条，开始分流…" % len(rows), flush=True)
     out = []
-    for r in rows:
+    for _i, r in enumerate(rows, 1):
+        if _i % 500 == 0:
+            print("  已处理 %d/%d" % (_i, len(rows)), flush=True)
         cls, why = classify(r)
         r2 = dict(r)
         r2["war_filter"] = cls
