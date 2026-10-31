@@ -46,6 +46,12 @@ except Exception:  # noqa: BLE001
 
 # 社交/聚合平台：不能当台账的「来源」（老师核不到、也常被删）
 # 汇总页/统计页：不是「某一起事件」的报道，不能当台账来源
+# URL 里带这些词，说明报道讲的是「社区冲突/反恐清剿」而不是恐袭本身
+BAD_URL_WORD = re.compile(
+    r"(?i)(communal|clash|ethnic|sectarian|tribal|reprisal|"
+    r"kill[s]?-?10-terrorists|forces-kill|troops-kill|army-kill|"
+    r"foil|arrest|crackdown|offensive|operation)")
+
 AGGREGATE = re.compile(
     r"(?i)(/timeline|/statistics|/statistic|/archive|/category/|/tag/|/topics?/|"
     r"terrorist-activity|/data/|/index)")
@@ -182,6 +188,9 @@ def _days_diff(a, b):
         return 99999
 
 
+USED_URLS = set()
+
+
 def pick(urls, office, headline, evd=None):
     """挑最可能的一条；返回 (url, note)。
 
@@ -211,6 +220,9 @@ def pick(urls, office, headline, evd=None):
         # 汇总页直接淘汰（不是某一起事件的报道）
         if AGGREGATE.search(url):
             continue
+        # URL 里写明是社区冲突/反恐行动 -> 淘汰
+        if BAD_URL_WORD.search(url):
+            continue
 
         # ① 日期校验（严格）：没有日期信息的 URL 一律不要。
         #    实测教训：不卡日期会补进「2025-12 美国法院新闻」「法属圭亚那枪击」这类
@@ -219,7 +231,7 @@ def pick(urls, office, headline, evd=None):
         if not ud:
             continue
         gap = _days_diff(ud, evd) if evd else 0
-        if evd and gap > 31:
+        if evd and gap > 7:      # 从 31 天收到 7 天：实测 31 天会放进「6月20日」的旧报道
             continue
         why.append("日期差%d天" % gap)
         s = 5 if gap <= 7 else 3
@@ -240,6 +252,8 @@ def pick(urls, office, headline, evd=None):
         if NEWS.search(url):
             s += 2
 
+        if url in USED_URLS:      # 同一链接不重复用
+            continue
         scored.append((s, url, title, hit, why))
 
     if not scored:
@@ -387,6 +401,8 @@ def main():
         url, note = pick(res, r.get("source_office"),
                          r.get("source_headline") or r.get("事件摘要"),
                          event_date(r))
+        if url:
+            USED_URLS.add(url)
         if url:
             if kind == "jsonl":
                 r["url"] = url
