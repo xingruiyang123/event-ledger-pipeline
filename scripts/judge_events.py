@@ -74,10 +74,10 @@ INTERSTATE = re.compile(
 # 实测踩到：UCDP 把「farmers-herders clash」归入 type=2 单方面暴力，
 # 被当成恐袭计入（尼日利亚 7-01 死 48 那条）。农牧民冲突是社区暴力，不是恐袭。
 COMMUNAL = re.compile(
-    r"(?i)\b(?:farmers?[- ]herders?|herdsmen|communal (?:clash|violence|conflict)|"
+    r"(?i)\b(?:farmers?[- ]herders?|herders?|herdsmen|communal (?:clash|violence|conflict)|"
     r"inter-?communal|ethnic (?:clash|violence|conflict)|sectarian (?:clash|violence)|"
     r"cattle (?:raid|rustl)|land dispute|family (?:feud|dispute|infighting)|"
-    r"clan (?:feud|clash|conflict)|tribal (?:clash|conflict)|vigilante (?:clash|group)|border clash(?:es)?|Oromia|Sidama|Amhara|Benishangul|Afar)\b")
+    r"clan (?:feud|clash|conflict)|tribal (?:clash|conflict|fighting|violence)|Fulani (?:settlement|village|herders?)|reprisal attack|vigilante (?:clash|group)|border clash(?:es)?|Oromia|Sidama|Amhara|Benishangul|Afar)\b")
 
 # 事故/灾害（N3）
 ACCIDENT = re.compile(
