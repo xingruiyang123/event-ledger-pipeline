@@ -211,6 +211,10 @@ def main():
                 "adm1": (r.get("adm_1") or "").strip(),
                 "lat": r.get("latitude"), "lon": r.get("longitude"),
                 "date_prec": r.get("date_prec"),
+                # 下面三个是「补链接」用的线索：UCDP 不给 URL，只能靠媒体名+日期+标题反查
+                "source_office": (r.get("source_office") or "").strip(),
+                "source_headline": (r.get("source_headline") or "").strip(),
+                "source_date": (r.get("source_date") or "").strip(),
             },
         })
 
