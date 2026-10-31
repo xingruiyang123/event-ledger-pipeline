@@ -14,6 +14,31 @@ license: MIT
 > 判定链会直接把事件判成「不计入」，整张表会是空的。** 换域必须先重写 S0 判定链，
 > 见 `reference/00-口径先立.md` 末节「换域怎么办」。
 
+## ⚠️ 开工第一件事：先选数据源，再谈检索
+
+**公开新闻索引适合做「专题样本」，做不了「月度全域台账」。**
+
+实测依据（2026-08 全量实测）：维基「当前事件」31 天全抓 → 99 条候选 →
+结构化抽取 + 战争语境分流 → 按口径只能计入 **8 条**；而尼日利亚一国官方口径同月就有 **500 起安全事件**。
+
+| 要求 | 数据源 | 预期条数 | 实测 |
+|---|---|---|---|
+| **月度全域台账** | **UCDP 正式 GED**（免费、无需注册、39MB、覆盖 1989–去年） | 数十至数百 | 2025-08：2361 条 → 判定后 **102 条** |
+| 最新月份（当月/上月） | UCDP **候选集**（1.6MB，只含在编月份） | 十几至几十 | 2026-08：仅 27 条 |
+| 专题样本 | 公开新闻索引 + 逐源点名 | 十几至几十 | 2026-08 维基：**8 条** |
+| 快速摸底 | 维基「当前事件」日历 | 十几 | 2026-08：99 条候选 |
+
+**UCDP 是月度台账的首选**（免费、可离线、有分方死亡数、非洲覆盖好）：
+
+```bash
+curl -C - -o ged261.zip https://ucdp.uu.se/downloads/ged/ged261-csv.zip   # 39MB，断点续传
+python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jsonl
+```
+
+> ⚠️ **最容易踩的坑：用候选集查历史月份。** 候选集只保留**还在编码队列**的月份，
+> 历史月份已移入正式 GED。实测用候选集查 2026-08 只有 27 条 —— 会得出
+> 「8 月只有 27 起」的错误结论。脚本会自动诊断并提示。
+
 ## 先做这一步（不可跳过）
 
 ```bash
@@ -114,6 +139,7 @@ P 置信度      Q 审核状态    R 关联知识点  S 备注
 python scripts/env_check.py --ppt                                   # 0 环境 / 2 缺依赖
 
 # —— 找全 ——
+python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jsonl  # 月度首选
 python scripts/harvest_wiki_events.py --month 2026-08 --out 候选.jsonl   # 0 候选够量 / 2 太少
 python scripts/extract_events.py --in 候选.jsonl --out 事件.jsonl         # 结构化抽取
 python scripts/filter_war_context.py --in 事件.jsonl --out 分流.jsonl     # 战争语境分流
@@ -143,6 +169,13 @@ python scripts/gate_single_file.py 交付/index.html --pages <你的页数>     
 | **`gate_plausibility`** | **内部全绿但量级不可信**：17 条就交付，而该国同月 500 起事件；高发国家 0 条 |
 
 全部 `0 = 通过 / 2 = 有失败项 / 1 = 无法判定`，都支持 `--json`。
+
+**或者一条命令串起来**（会按顺序执行并给出失败诊断）：
+
+```bash
+python scripts/run_pipeline.py --month 2025-08 --ucdp ged261.zip --outdir ./out
+python scripts/run_pipeline.py --month 2026-08 --wiki-only --outdir ./out   # 没有 UCDP 时兜底
+```
 **不要用「我看了一眼没问题」代替它们** —— 本项目整列数据被写成空白、死链被当成有效、
 PPT 溢出 246px、条形宽度为 0，肉眼一次都没看出来。
 
