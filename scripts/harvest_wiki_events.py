@@ -145,7 +145,7 @@ def _is_empty_day_page(text):
     t = text.strip()
     if "Jump to content" in t[:2000]:
         return False
-    # tf.py 之类的外部抓取工具会在前面加几行包装头，所以不能只认精确子串
+    # 外部抓取工具（curl / wget / 任意能取网页的命令）会在前面加几行包装头，所以不能只认精确子串
     has_frame = ("Current events" in t and "year=" in t) or "top=yes" in t
     has_news_marker = "All news items below this line" in t
     # 页面里有没有真正的条目？没有 * 开头且长于 25 字的行，就算空页
@@ -331,7 +331,7 @@ def main():
                     help="低于此条数视为抓取失败（默认 80：一个月全球恐袭/武装袭击不该少于这个量级）")
     ap.add_argument("--keep-noise", action="store_true", help="保留疑似非事件条目（调试用）")
     ap.add_argument("--fetch-cmd", default=None,
-                    help="外部抓取命令，用 {url} 占位，如 'tf.py fetch {url}'。"
+                    help="外部抓取命令，用 {url} 占位，如 'curl -sL {url}'。"
                          "国内网络常连不上维基，强烈建议指定一个本机可用的抓取工具")
     ap.add_argument("--timeout", type=int, default=25, help="单页抓取超时秒数")
     ap.add_argument("--workers", type=int, default=4, help="并发抓取天数（默认 4，别调太猛）")
