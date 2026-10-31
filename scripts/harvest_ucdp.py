@@ -176,7 +176,11 @@ def main():
             "actor_a": (r.get("side_a") or "").strip(),
             "actor_b": (r.get("side_b") or "").strip(),
             "act_type": TYPE_MEANING.get(t, "unknown"),
-            "url": (r.get("source_article") or "").strip(),
+            # UCDP 的 source_article 是「媒体名,日期,标题」的引用串，不是链接。
+            # 塞进「信息来源URL」列会让 100% 的行都不是真 URL（实测 142 行 0 条 http）。
+            # 所以：url 留空（交给 S3 补真实链接），引用串原样放 extra 供回溯。
+            "url": "",
+            "source_citation": (r.get("source_article") or "").strip(),
             "raw_id": r.get("id"),
             "extra": {
                 "type_of_violence": t,
