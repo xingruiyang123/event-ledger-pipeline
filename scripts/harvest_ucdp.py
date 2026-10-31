@@ -127,6 +127,10 @@ def main():
     ap.add_argument("--month", required=True, help="YYYY-MM")
     ap.add_argument("--out", default=None)
     ap.add_argument("--types", default="1,2,3", help="只保留这些 type_of_violence，默认全部")
+    ap.add_argument("--country", default=None,
+                    help="只保留某国（支持中英文，如 尼日利亚 / Nigeria；逗号分隔可多选）")
+    ap.add_argument("--list-countries", action="store_true",
+                    help="列出该文件里有数据的国家及条数")
     ap.add_argument("--min-items", type=int, default=20,
                     help="低于此条数视为该月未收录（默认 20）")
     ap.add_argument("--json", action="store_true")
@@ -138,6 +142,14 @@ def main():
         return 1
 
     keep_types = {t.strip() for t in a.types.split(",") if t.strip()}
+    want_cty = None
+    if a.country:
+        want_cty = set()
+        for c in a.country.split(","):
+            c = c.strip()
+            if c:
+                want_cty.add(zh(c))          # 中英文都归一成中文
+                want_cty.add(c)
 
     try:
         rows = open_rows(path)
@@ -158,6 +170,10 @@ def main():
         t = (r.get("type_of_violence") or "").strip()
         if t and t not in keep_types:
             continue
+        if want_cty is not None:
+            c_raw = (r.get("country") or "").strip()
+            if zh(c_raw) not in want_cty and c_raw not in want_cty:
+                continue
 
         best = num(r.get("best"))
         civ = num(r.get("deaths_civilians"))
@@ -240,10 +256,14 @@ def main():
     if not ok:
         print("  ✗ 只有 %d 条，低于下限 %d。" % (len(out), a.min_items))
         if a.candidate:
-            print("    你可能用候选集查了历史月份。候选集只保留还在编码队列的月份，")
-            print("    历史月份请用正式 GED：--ged ged261-csv.zip")
+            print("    两种可能，都要查：")
+            print("    (1) 你可能用了「精简候选集」（1.6MB，只含最新在编月）。")
+            print("        今年各月要用「累计候选集」（13MB，文件名带日期区间如 _01_26_09）。")
+            print("    (2) 该月已被移入正式 GED，候选集里只剩残余。")
+            print("        历史月份改用：--ged ged261-csv.zip（覆盖 1989 至去年）")
         else:
-            print("    该月可能确实未收录（GED 滞后约一年）。可换候选集查最新月份。")
+            print("    该月可能确实未收录（正式 GED 滞后约一年）。")
+            print("    今年各月改用累计候选集：--candidate GEDEvent_v26_01_26_09.csv")
 
     print("→", a.out or "(未指定 --out)")
     print("=" * 70)
