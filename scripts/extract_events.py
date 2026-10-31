@@ -277,7 +277,8 @@ def judge_side(text):
 
 
 def extract_one(rec):
-    text = rec.get("text") or ""
+    # UCDP 候选只有 summary 没有 text，两个都要认，否则整池抽取为空
+    text = rec.get("text") or rec.get("summary") or ""
     cty = canon_country(text, rec.get("country_guess") or "")
     deaths, injured, basis = extract_numbers(text)
     act = pick_act(text)
