@@ -226,6 +226,17 @@ def judge(rec, min_deaths=1):
     t = str(rec.get("extra", {}).get("type_of_violence") or "")
     cty = rec.get("country", "") or ""
 
+    # 拉美街头凶杀：必须在兜底判定之前拦，否则被 _from_text 判成袭击
+    LATAM_STREET = re.compile(
+        r"(?i)(store employee|shop employee|hardware store|found dead|"
+        r"shot dead in|killed in front of|inside (?:his|her|a) (?:home|house|car)|"
+        r"settling of scores|barber|street vendor|hitman)")
+    if (cty in LATAM and not POLITICAL_ARMED.search(a + " " + b + " " + txt)
+            and (t == "2" or LATAM_STREET.search(txt))):
+        return "不计入", "N2", (
+            "拉美区域的有组织犯罪/街头凶杀：UCDP 在该区域把帮派与刑案记为单方面暴力，"
+            "不属恐怖主义")
+
     # 脱敏行为体 / 分方死亡缺失：先用摘要兜底判定，判不了才交人
     if is_anon(a) or is_anon(b):
         v = _from_text(txt, civ, deaths, cty, t)
@@ -252,10 +263,6 @@ def judge(rec, min_deaths=1):
         return "不计入", "N1", "社区/民族/家族冲突（非恐怖主义暴力）"
 
     # N2 拉美有组织犯罪：该区域 type=2 默认是帮派/卡特尔暴力，不是恐怖主义
-    if cty in LATAM and t == "2" and not POLITICAL_ARMED.search(a + " " + b + " " + txt):
-        return "不计入", "N2", (
-            "拉美区域的有组织犯罪暴力（%s）：UCDP 在该区域把帮派/卡特尔杀人记为"
-            "单方面暴力，不属恐怖主义" % (a or "?"))
 
     # N2 犯罪组织
     if "criminal" in kinds:
