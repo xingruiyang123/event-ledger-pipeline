@@ -217,6 +217,13 @@ def main():
     if not rows:
         fails.append("数据区 %d-%d 内没有任何数据行 —— 空表不许通过" % (lo, hi))
 
+    # ---- A1b. 伤亡全 0 断言 ----
+    # 实测：134 行、死亡全填 0 的「恐怖袭击台账」能同时通过三个门禁。
+    # 恐怖袭击台账死亡合计为 0，几乎一定是数据没赋值或抽取失败。
+    if rows and all((x["deaths"] or 0) == 0 and (x["injuries"] or 0) == 0 for x in rows):
+        fails.append("全表 %d 行的死亡与受伤都是 0 —— 恐怖袭击台账不该全为 0，"
+                     "多半是伤亡列没赋值或抽取失败" % len(rows))
+
     # ---- A2. 解析失败断言：解析不了的值不许静默当 0 ----
     bad_cells = [(x["row"], x["raw_deaths"], "死亡") for x in rows if x["kind_d"] == "bad"]
     bad_cells += [(x["row"], x["raw_inj"], "受伤") for x in rows if x["kind_i"] == "bad"]
@@ -358,8 +365,12 @@ def main():
         print("=" * 66)
         return 2
 
-    print("结论：通过。逐行加总与公布合计一致%s。"
-          % ("，派生配置也一致" if cfg_d is not None else ""))
+    if exp_d is None and cfg_d is None:
+        print("结论：通过（但本次未做合计对账 —— 没给 --expect，也没有 --config）。")
+        print("      建议补上：--expect 死亡:受伤")
+    else:
+        print("结论：通过。逐行加总与公布合计一致%s。"
+              % ("，派生配置也一致" if cfg_d is not None else ""))
     print("=" * 66)
     return 0
 
