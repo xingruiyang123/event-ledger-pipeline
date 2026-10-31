@@ -205,7 +205,12 @@ def pick(urls, office, headline, evd=None):
     """
     scored = []
     hl = (headline or "").lower()
-    hl_words = [w for w in re.findall(r"[a-z]{4,}", hl)]
+    # 必须用 Unicode 归一化后再提取：原来只认 [a-z]{4,}，
+    # 葡萄牙语 Polícia / 法语 Région 会被重音字母切断，导致实词匹配永远失败。
+    import unicodedata
+    hl_norm = unicodedata.normalize("NFKD", hl)
+    hl_norm = "".join(c for c in hl_norm if not unicodedata.combining(c))
+    hl_words = [w for w in re.findall(r"[a-z]{4,}", hl_norm)]
     # 过滤掉太通用的词，避免「police」「killed」凑数
     STOP = {"killed", "police", "attack", "with", "from", "that", "this",
             "have", "been", "were", "after", "over", "into", "their", "they",
@@ -228,24 +233,31 @@ def pick(urls, office, headline, evd=None):
         #    实测教训：不卡日期会补进「2025-12 美国法院新闻」「法属圭亚那枪击」这类
         #    看似沾边、其实与本月本国的案件毫不相干的链接。
         ud = url_date(url)
-        if not ud:
-            continue
-        gap = _days_diff(ud, evd) if evd else 0
-        if evd and gap > 7:      # 从 31 天收到 7 天：实测 31 天会放进「6月20日」的旧报道
-            continue
-        why.append("日期差%d天" % gap)
-        s = 5 if gap <= 7 else 3
+        if ud:
+            gap = _days_diff(ud, evd) if evd else 0
+            if evd and gap > 7:   # 31 天会放进「6月20日」的旧报道
+                continue
+            why.append("日期差%d天" % gap)
+            s = 5 if gap <= 7 else 3
+        else:
+            # URL 里没有日期：不直接拒（大量新闻站 URL 不含日期），
+            # 但要求标题更强匹配，否则一律不要。
+            why.append("URL无日期")
+            s = 0
 
         # ② 标题校验（严格）：至少 3 个「长实词」命中
         t = (title or "").lower()
+        t = "".join(c for c in unicodedata.normalize("NFKD", t)
+                    if not unicodedata.combining(c))
         long_words = [w for w in hl_words if len(w) >= 5]
-        if len(long_words) >= 3:
+        need = 4 if not ud else 3
+        if len(long_words) >= need:
             hit = sum(1 for w in long_words if w in t)
-            if hit < 3:
+            if hit < need:
                 continue
         else:
             hit = sum(1 for w in hl_words if w in t)
-            if hit < 2:
+            if hit < (need - 1 if need > 2 else need):
                 continue
         s += min(hit, 5) * 2
 
@@ -338,6 +350,36 @@ def build_query(rec):
             return m.group(1).strip()[:110]
 
     hl = hl[:100]
+
+    # 标题碎片化时换成「国家 + 地点 + 月份 + 伤亡」构造查询。
+    # 实测：UCDP 的 headline 经常只有 "A soldier" / "#BreakingNews" / "Two people"，
+    # 这种标题搜不出任何东西（188 条只补到 8 条）。改用结构化特征更有效。
+    frag = (len(hl.strip()) < 18
+            or not re.search(r"[A-Za-z一-龥]{4,}\s+\S", hl)
+            or hl.strip().startswith("#"))
+    if frag:
+        parts = []
+        cty = str(rec.get("国家") or rec.get("country") or "").strip()
+        if cty:
+            parts.append(cty)
+        plc = str(rec.get("地点") or rec.get("place") or "").strip()
+        # 地点里常有坐标串，只取前两段文字
+        plc = re.split(r"[;,]", plc)[0].strip()[:32]
+        if plc and plc.lower() not in cty.lower():
+            parts.append(plc)
+        mm = str(rec.get("月份") or "").strip()
+        yy = str(rec.get("年份") or "").strip()
+        MON = {"1": "January", "2": "February", "3": "March", "4": "April",
+               "5": "May", "6": "June", "7": "July", "8": "August",
+               "9": "September", "10": "October", "11": "November", "12": "December"}
+        if mm in MON:
+            parts.append(MON[mm])
+        if yy:
+            parts.append(yy)
+        parts.append("attack killed")
+        q2 = " ".join(parts)
+        return q2
+
     q = ("%s %s" % (office, hl)).strip()
     return q or hl
 
