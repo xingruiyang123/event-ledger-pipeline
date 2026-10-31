@@ -86,6 +86,48 @@ COMMUNAL = re.compile(
     r"cattle (?:raid|rustl)|land dispute|family (?:feud|dispute|infighting)|"
     r"clan (?:feud|clash|conflict)|tribal (?:clash|conflict|fighting|violence)|Fulani (?:settlement|village|herders?)|reprisal attack|vigilante (?:clash|group)|border clash(?:es)?|Oromia|Sidama|Amhara|Benishangul|Afar)\b")
 
+# 拉美：UCDP 的 type=2「单方面暴力」在该区域大量用于记录帮派/卡特尔杀人，
+# 不是恐怖主义。实测 2026-07：巴西 Comando Vermelho 9 条、墨西哥 Jalisco Cartel 106 条、
+# 厄瓜多尔 Los Choneros、哥伦比亚 La Nueva Generación —— 全是街头火并和凶杀，
+# 摘要形如「Man shot dead in front of his wife」「拒绝交手机被枪杀」。
+# 只有明确的政治性武装组织（ELN/FARC 等）才算。
+LATAM = {"巴西", "哥伦比亚", "墨西哥", "厄瓜多尔", "危地马拉", "洪都拉斯",
+         "萨尔瓦多", "委内瑞拉", "秘鲁", "玻利维亚", "海地", "多米尼加",
+         "巴拿马", "哥斯达黎加", "尼加拉瓜", "阿根廷", "巴拉圭", "智利"}
+POLITICAL_ARMED = re.compile(
+    r"(?i)(\bELN\b|\bFARC\b|\bEPL\b|dissiden|guerrilla|民族解放军|"
+    r"Autodefensas Unidas|\bAUC\b|Sendero Luminoso|光辉道路)")
+
+# ---- 摘要兜底信号 ----
+# 行为体被脱敏（XXX100）或分方死亡缺失时，用摘要关键词做二次判定。
+# 实测：2026-07 有 140 条非洲条目摘要里有完整事件描述（如
+# 「IS claims killing 17 soldiers」「Nine civilians killed in an attack」），
+# 但因为没有 actor 名称全被扔进「需人工判」。这些其实能判。
+SRC_ATTACK = re.compile(
+    r"(?i)("
+    r"(?:militants?|insurgents?|terrorists?|jihadists?|gunmen|assailants|"
+    r"extremists?|bandits?|IS|ISWAP|ISIS|Boko Haram|JNIM|al-?Shabaab|"
+    r"ADF|M23|AQAP|ISKP|TTP|BLA)\s+"
+    r"(?:claims?|claimed|kills?|killed|attacks?|attacked|opened fire|raided|stormed)"
+    r"|(?:killed|kills|killing|murdered|abducted|massacred)\s+(?:by|in an? attack)"
+    r"|(?:suicide|car bomb|roadside bomb|IED|grenade|rocket)\s+(?:attack|blast|explosion)"
+    r"|(?:attack|raid|ambush|massacre)\s+(?:on|kills?|leaves?)"
+    r"|killing of .{0,40}? by (?:gunmen|militants?|attackers?|assailants?|terrorists?|insurgents?|unknown)"
+    r")")
+SRC_GOV_OP = re.compile(
+    r"(?i)(neutraliz|(?:forces?|troops?|army|police|security|military)\s+(?:kill|killed|kills|raid|raided|foil|foiled|arrest|arrested|capture|captured|repel|repelled|rescue|rescued|launch|launches|manhunt)|rescue|repel|manhunt|foil|arrest|operation\s+(?:against|targeting)|airstrike|air strike|drone strike|offensive|combat)")
+
+# 社区/农牧冲突信号（尼日利亚 Fulani、Plateau 等地高发）
+SRC_COMMUNAL = re.compile(
+    r"(?i)(Fulani|herders?|herdsmen|farmers?[- ]herders?|Plateau|community (?:attack|clash)|communal|cattle|livestock|land (?:conflict|dispute))")
+
+# 汇总条目（不是单起事件）
+SRC_AGGREGATE = re.compile(r"(?i)(Timeline\s*.{0,8}Terrorist|monthly (?:report|newsletter|roundup|summary))")
+
+# 其他排除信号（土地冲突/普通刑案/交通事故）
+SRC_EXCLUDE = re.compile(
+    r"(?i)(land conflict|land dispute|clan conflict|tribal|drug|narcotics|smuggled|domestic (?:dispute|violence)|road accident|traffic (?:accident|crash)|robbery)")
+
 # 事故/灾害（N3）
 ACCIDENT = re.compile(
     r"(?i)\b(?:accident|collision|crash|explosion at a (?:factory|mine)|"
@@ -118,6 +160,53 @@ def side_kind(s):
     return "unknown"
 
 
+def _num_from_text(txt):
+    """从摘要里提取「N killed/killed N/N dead」的数字。"""
+    m = re.search(r"(?i)(\d{1,4})\s*(?:people\s*)?(?:were\s*)?(?:killed|dead|died|die)", txt)
+    if m:
+        return int(m.group(1))
+    m = re.search(r"(?i)(?:killed|kills|leaves?|left)\s+(?:at least\s+)?(\d{1,4})", txt)
+    if m:
+        return int(m.group(1))
+    return None
+
+
+def _from_text(txt, civ, deaths, cty, t):
+    """行为体判不了时，用摘要做兜底判定。返回 (verdict, chain, note) 或 None。
+
+    顺序很重要：排除信号 > 政府行动 > 袭击信号。
+    因为「军队击毙武装分子」同时含 attack 和 gov_op 词，必须判成反恐行动。
+    """
+    if SRC_AGGREGATE.search(txt):
+        return ("不计入", "兜底", "汇总结算条目，不是单起事件")
+
+    if SRC_EXCLUDE.search(txt) or SRC_COMMUNAL.search(txt):
+        return ("不计入", "N1",
+                "摘要显示为社区/农牧/土地冲突或普通刑案，非恐怖主义暴力")
+
+    has_atk = bool(SRC_ATTACK.search(txt))
+    has_gov = bool(SRC_GOV_OP.search(txt))
+
+    # 两者都有 -> 大概率是政府行动（袭击者被击毙之类）
+    if has_gov and not (has_atk and re.search(r"(?i)(claims?|claimed|responsibility)", txt)):
+        return ("保留", "X1",
+                "摘要显示为政府/军警主导的打击行动（反恐行动），作对照、不计入统计")
+
+    if has_atk:
+        n = _num_from_text(txt)
+        dd = max(civ or 0, deaths or 0, n or 0)
+        if civ > 0:
+            return ("计入", "P3+P4", "摘要显示武装袭击致平民死亡 %d" % civ)
+        if dd > 0:
+            return ("计入", "P5", "摘要显示武装袭击，死亡 %d" % dd)
+        return ("计入", "P5", "摘要显示武装袭击（未给死亡数）")
+
+    if has_gov:
+        return ("保留", "X1", "摘要显示为政府/军警行动，作对照、不计入统计")
+
+    return None
+
+
 def judge(rec, min_deaths=1):
     """返回 (verdict, chain, note)。verdict ∈ {计入, 不计入, 需人工判}。"""
     a = rec.get("actor_a", "") or ""
@@ -137,12 +226,15 @@ def judge(rec, min_deaths=1):
     t = str(rec.get("extra", {}).get("type_of_violence") or "")
     cty = rec.get("country", "") or ""
 
-    # 脱敏行为体：无法判性质，直接交人（不猜）
+    # 脱敏行为体 / 分方死亡缺失：先用摘要兜底判定，判不了才交人
     if is_anon(a) or is_anon(b):
+        v = _from_text(txt, civ, deaths, cty, t)
+        if v:
+            return v
         if deaths == 0 and civ == 0:
             return "不计入", "兜底", "行为体脱敏且无死亡记录"
-        return "需人工判", "-", ("行为体被 UCDP 脱敏（%s/%s），无法判性质；"
-                                "需看原文确认是恐袭还是帮派/交战" % (a or "?", b or "?"))
+        return "需人工判", "-", ("行为体被 UCDP 脱敏（%s/%s），摘要无足够信号；"
+                                "需看原文确认" % (a or "?", b or "?"))
 
     ka, kb = side_kind(a), side_kind(b)
     kinds = {ka, kb}
@@ -158,6 +250,12 @@ def judge(rec, min_deaths=1):
     # N1 社区/民族/家族冲突
     if COMMUNAL.search(txt):
         return "不计入", "N1", "社区/民族/家族冲突（非恐怖主义暴力）"
+
+    # N2 拉美有组织犯罪：该区域 type=2 默认是帮派/卡特尔暴力，不是恐怖主义
+    if cty in LATAM and t == "2" and not POLITICAL_ARMED.search(a + " " + b + " " + txt):
+        return "不计入", "N2", (
+            "拉美区域的有组织犯罪暴力（%s）：UCDP 在该区域把帮派/卡特尔杀人记为"
+            "单方面暴力，不属恐怖主义" % (a or "?"))
 
     # N2 犯罪组织
     if "criminal" in kinds:
