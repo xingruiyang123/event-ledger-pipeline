@@ -772,6 +772,9 @@ def main():
     ap.add_argument("--priority", default="deaths",
                     choices=["deaths", "none"],
                     help="处理顺序。deaths=按死亡数降序（重要事件先补到链接），none=按原序")
+    ap.add_argument("--resume", action="store_true",
+                    help="断点续跑：跳过 .progress.json 里已处理过的条目。"
+                         "全量 2568 条要两小时，中途被打断必须能接着跑，否则永远跑不完")
     ap.add_argument("--fill", default="", help="xlsx 模式下用哪个值填（默认 信息来源URL）")
     a = ap.parse_args()
 
@@ -831,9 +834,51 @@ def main():
             print("  ② 用 agent 自己的 web_search 逐条查，再把 url 写回台账")
         return 2
 
+    # ---- 断点续跑 ----
+    # 全量补链要两小时，中途被打断（关机、超时、换轮次）很常见。
+    # 没有进度文件就只能从头再来，于是永远跑不完。
+    # progress 记「处理过的 key」，没补到链接的也记 —— 否则每轮都会重试
+    # 那些注定失败的长尾事件（村级别死 2 人，根本没有英文报道）。
+    _prog_path = (a.out or a.inp) + ".progress.json"
+    _done = set()
+    if a.resume and os.path.isfile(_prog_path):
+        try:
+            _done = set(json.load(io.open(_prog_path, encoding="utf-8")))
+            print("  断点续跑：已完成 %d 条" % len(_done))
+        except Exception:  # noqa: BLE001
+            _done = set()
+
+    def _rkey(rec):
+        return "|".join([
+            str(rec.get("国家") or rec.get("country") or ""),
+            str(rec.get("月份") or ""),
+            str(rec.get("日期") or ""),
+            str(rec.get("死亡人数") or rec.get("deaths") or ""),
+            str(rec.get("事件摘要") or rec.get("summary") or "")[:50],
+        ])
+
+    if _done:
+        _before = len(todo)
+        todo = [i for i in todo if _rkey(rows[i]) not in _done]
+        print("  跳过已处理 %d 条，剩 %d 条" % (_before - len(todo), len(todo)))
+        if not todo:
+            print("  全部已处理完，无需再跑。")
+            return 0
+
+    def _save_progress():
+        if not _prog_new:
+            return
+        try:
+            _all = set(_done) | set(_prog_new)
+            with io.open(_prog_path, "w", encoding="utf-8") as _pf:
+                json.dump(sorted(_all), _pf, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
+
     filled = 0
     n_searched = 0
     failed = []
+    _prog_new = []
     t0 = time.time()
     for n, i in enumerate(todo, 1):
         # 预算到点就停，把已补到的写回（剩下的一轮再继续）
@@ -843,6 +888,12 @@ def main():
             break
 
         r = rows[i]
+
+        # 记进度：处理过就记，不管有没有补到链接。
+        # 只记成功的会让失败的长尾每条重跑一遍，两小时变四小时。
+        _prog_new.append(_rkey(r))
+        if len(_prog_new) % 20 == 0:
+            _save_progress()
 
         # ACLED 自带 source（媒体名）与 event_id_cnty，官网可据 event_id 查回原条目。
         # 再花一次检索去反查 URL 是浪费：4 小时里有一半会耗在这上面。
@@ -991,6 +1042,9 @@ def main():
                 ws.append([r.get(h) for h in hdr])
             wb.save(a.out)
         print("已写出：%s" % a.out)
+
+    # 收尾落盘：正常跑完、预算到点、被 Ctrl-C，都尽量落到这里
+    _save_progress()
 
     if failed:
         print()
