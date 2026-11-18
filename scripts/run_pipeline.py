@@ -575,6 +575,8 @@ def main():
         jargs = [os.path.join(HERE, "judge_events.py"),
                  "--in", cand, "--out", judged,
                  "--out-manual", os.path.join(od, "02_需人工判.json"),
+                 "--out-excluded", os.path.join(od, "02b_排除.json"),
+                 "--out-keep", os.path.join(od, "02c_保留作对照.json"),
                  # 显式给 0：口径要求未遂与零伤亡照常计入
                  "--min-deaths", "0"]
         # 把跨源核验结果传进去：19 列台账的「置信度」列要写 A/B，
@@ -583,6 +585,19 @@ def main():
         if os.path.isfile(_vmap):
             jargs += ["--verify-map", _vmap]
         run_step("判定（判定链）", jargs, allow_fail=True)
+        # 漏斗对账：每条数据的去向必须说得清。
+        # 「无遗漏」不等于「全进台账」—— 判定链本来就要排除国家间战争、
+        # 帮派火并、执法行动。要保证的是：四项加起来必须等于输入。
+        run_step("漏斗对账（每条数据去向）",
+                 [os.path.join(HERE, "audit_funnel.py"),
+                  "--cand", cand,
+                  "--ledger", judged,
+                  "--manual", os.path.join(od, "02_需人工判.json"),
+                  "--excluded", os.path.join(od, "02b_排除.json"),
+                  "--keep", os.path.join(od, "02c_保留作对照.json"),
+                  "--out", os.path.join(od, "漏斗对账.md")],
+                 expect=0, allow_fail=True)
+
         print("")
         print("  ℹ️  「需人工判」不是「待定」，是明确的动作：逐条看原文判完写回。")
         print("     判定规则可改：edit scripts/judge_events.py 里的 judge() 函数。")
