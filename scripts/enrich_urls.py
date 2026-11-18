@@ -770,7 +770,10 @@ def main():
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", default=None)
     ap.add_argument("--search-cmd", default=None,
-                    help="搜索命令模板，{q} 为查询占位。不传则只导出待补清单")
+                    help="搜索命令模板，{q} 为查询占位。不传则只导出待补清单。"
+                         "**速度差 7.5 倍**：直连元宝 'D:/DSH/yb.cmd search \"{q}\" --cnt 20'"
+                         " 约 1.2 秒/条；走路由器 'D:/DSH/sx.cmd search \"{q}\" --task auto --json'"
+                         " 约 9 秒/条（2484 条要 6.2 小时 vs 50 分钟）")
     ap.add_argument("--limit", type=int, default=0, help="只处理前 N 条（0=全部）")
     ap.add_argument("--timeout", type=int, default=60, help="单次搜索超时秒")
     ap.add_argument("--sleep", type=float, default=1.0, help="每条之间的间隔秒数（防限流）")
