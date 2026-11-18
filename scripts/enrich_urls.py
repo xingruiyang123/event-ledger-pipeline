@@ -72,7 +72,17 @@ JUNK_DOMAIN = re.compile(
 BLOCK = re.compile(
     r"(?i)(facebook\.com|twitter\.com|x\.com/|instagram\.com|tiktok\.com|"
     r"youtube\.com|youtu\.be|t\.me/|reddit\.com|wikipedia\.org|"
-    r"news\.google\.com|google\.com/url|bing\.com|duckduckgo\.com)")
+    r"news\.google\.com|google\.com/url|bing\.com|duckduckgo\.com|"
+    # 百科/地理/点评类：能证明「这个地方存在」，不能证明「这起事件发生」。
+    # 实测 2026-07 有 2/148 条补成了这种：
+    #   wikiwand.com/en/articles/Centre-Nord
+    #   kids.kiddle.co/Est_Region_%28Burkina_Faso%29
+    # 点开是地名解释 —— 比没有链接更糟，因为看起来像有回溯。
+    r"wikiwand|kiddle|britannica|fandom\.com|worldatlas|mapsofworld|"
+    r"geonames|mindat|tripadvisor|maps\.google|"
+    r"weather|forecast|/about|/contact|/privacy|"
+    # 联邦宇宙/聚合站：和社交平台一样，不能作为事件原始出处
+    r"friendica|mastodon|lemmy|kbin|nitter|t\.co/)")
 # 常见可信媒体域名（用于优先挑选；不是硬门槛）
 NEWS = re.compile(
     r"(?i)(reuters\.com|apnews\.com|afp\.com|bbc\.|aljazeera\.com|"
