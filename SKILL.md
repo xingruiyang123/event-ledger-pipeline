@@ -1268,6 +1268,55 @@ C 档 270 条（77%）精确率约 26-52%，逐条引用前需人工复核
 
 **不要不写这段话就交出去。**
 
+#### 可回溯性：新闻链接从 0% 到 42%
+
+「每条数据都可回溯」有两层：
+
+| 层 | 覆盖率 | 靠什么 |
+|---|---|---|
+| 事件能定位到原始记录 | **100%** | `[ID]UCDP:xxx` + `[坐标]lat,lon` |
+| 能点开一条新闻看原文 | **42%** | `enrich_urls.py` 补链 |
+
+第二层是补出来的。2026-07 实测（351 条，元宝通道，5.8 分钟）：
+
+```
+补到链接        148 / 351 = 42%
+A 档            10/22  = 45%
+B 档            32/59  = 54%
+A+B 高置信子集   42/81  = 52%
+C 档           106/270 = 39%
+```
+
+抽样 10 条核对摘要与 URL：**9 条 URL slug 直接对应事件**。
+
+```
+也门  11 soldiers killed in Houthi attacks south of Marib
+   → africannewsagency.com/11-soldiers-killed-in-houthi-attacks-against-yemens-marib
+墨西哥 alcalde asesinado a balazos
+   → elpais.com/mexico/2026-07-22/asesinado-a-balazos-...
+```
+
+剩下 58% 补不到，原因是 UCDP 摘要常只有「Nine killed in attack」这种
+不带地名的短句，搜不出唯一结果。**没补到就留空，不填凑数链接** ——
+宁可让人去查，也不能给一条看起来像证据的假链接。
+
+#### 一条会让「可回溯」变假象的坑
+
+补到的 148 条里有 2 条指向百科/地名页：
+
+```
+wikiwand.com/en/articles/Centre-Nord
+kids.kiddle.co/Est_Region_%28Burkina_Faso%29
+```
+
+点开是地名解释，**能证明「这个地方存在」，不能证明「这起事件发生」**。
+
+这比没有链接更糟 —— 台账看起来有回溯链接，实际点开什么都没有。
+
+所以补链时挡掉这类：百科（wikiwand / kiddle / britannica / fandom）、
+地理（worldatlas / mapsofworld / geonames）、点评（tripadvisor）、
+社交与聚合（facebook / twitter / youtube / friendica / mastodon / nitter）。
+
 #### 一句话
 
 **信源表的角色是「给事件找报道、给报道归属机构」，不是「逐家去问有没有事」。**
