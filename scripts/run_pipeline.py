@@ -594,6 +594,20 @@ def main():
             if os.path.isfile(judged_url):
                 judged = judged_url
 
+    # ---- 正文核验 ----
+    # 靠标题判断链接对不对，实测只有 67% 准。读正文能把「明确错误」筛出来
+    # （实测 40 条抓到正文的里只有 2 条是错的，5%），并给每条一个可复核的结论。
+    # 没给 --fetch-cmd 就跳过 —— 不抓正文也能交付，只是少了这道确认。
+    if a.fetch_cmd and os.path.isfile(judged):
+        vout = os.path.join(od, "02_判定_已核验.json")
+        vargs = [os.path.join(HERE, "verify_urls.py"),
+                 "--in", judged, "--out", vout,
+                 "--fetch-cmd", a.fetch_cmd]
+        run_step("正文核验（抓页面确认链接是否对应用起事件）",
+                 vargs, expect=0, allow_fail=True)
+        if os.path.isfile(vout):
+            judged = vout
+
     # ---- 信源表覆盖度审计 ----
     # 这一步回答「我们的名单到底覆盖了多少真实报道这些事件的媒体」。
     # 必须放在补链之后：补链结果里的域名才是实际用到的媒体。
