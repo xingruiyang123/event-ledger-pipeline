@@ -172,6 +172,9 @@ def write_coverage_note(path, month, contributions, judged, ledger_rows):
         "registry": ("信源表逐家遍历", "名录内媒体当月报道的全部相关事件（含非致命）",
                      "只覆盖名录里的机构；小国、小语种、无网站的媒体拿不到"),
         "registry_": ("信源表逐家遍历", "同上", "同上"),
+        "acled": ("ACLED", "政治暴力与抗议，**不以死亡为门槛**，含零死亡事件",
+                  "抗议/骚乱类需过滤；不含未遂图谋（那是执法通报，不是事件）"),
+        "01d_acled": ("ACLED", "同 上", "同上"),
         "nonlethal": ("未遂/非致命专项检索", "被挫败的图谋、未遂袭击、零死亡事件",
                       "只找「未遂/被挫败」这一类的报道；正常发生的袭击它不找"),
         "wiki": ("维基当前事件日历", "重大事件（偏欧美）", "非洲小规模袭击几乎不进"),
@@ -243,6 +246,13 @@ def main():
                     help="信源表 xlsx。给了就并行走「逐家遍历」，补 UCDP 收不到的非致命/未遂事件")
     ap.add_argument("--registry-limit", type=int, default=0,
                     help="逐家遍历只跑前 N 家（0=全部）。先小样本试时用")
+    ap.add_argument("--acled", default=None,
+                    help="ACLED 采集产物（jsonl，由 harvest_acled.py 生成）。"
+                         "补 UCDP 收不到的非致命与未遂事件")
+    ap.add_argument("--acled-env", default=None,
+                    help="含 ACLED_USERNAME/PASSWORD 的 .env。给了就自动跑 ACLED 采集")
+    ap.add_argument("--acled-max-pages", type=int, default=40,
+                    help="ACLED 最多翻多少页（每页 5000 条）")
     ap.add_argument("--nonlethal", action="store_true",
                     help="额外开一路「未遂/非致命专项检索」，需同时给 --search-cmd")
     a = ap.parse_args()
@@ -284,8 +294,9 @@ def main():
     if a.stage in ("harvest", "all"):
         if a.ucdp or a.ucdp_candidate:
             args = [os.path.join(HERE, "harvest_ucdp.py"), "--month", a.month,
-                    "--out", (os.path.join(od, "01a_ucdp.jsonl")
-                              if (a.registry or a.nonlethal) else cand),
+                    # 永远写分文件：若直接写 cand，多源合并时会出现
+                    # 「读 cand → 写 cand」同一个文件，虽然能跑但很脆。
+                    "--out", os.path.join(od, "01a_ucdp.jsonl"),
                     "--min-items", str(a.min_events)]
             args += (["--ged", a.ucdp] if a.ucdp else ["--candidate", a.ucdp_candidate])
             ok, out = run_step("采集：UCDP", args, expect=0, allow_fail=True)
@@ -322,12 +333,13 @@ def main():
             print("     用它做月度台账会系统性偏斜，交付说明里必须写清。")
 
         # ---- 单源告警：只用 UCDP 必然有系统性缺口，必须说出来 ----
-        if not a.registry and not a.nonlethal:
+        if not a.registry and not a.nonlethal and not a.acled and not a.acled_env:
             print("")
             print("  ⚠️  只用了 UCDP 一个源，有两类事件会系统性缺失：")
             print("     · 非致命袭击（零死亡）—— UCDP 只收造成死亡的有组织暴力")
             print("     · 未遂/被挫败的图谋 —— 口径要求计入，但 UCDP 不收")
-            print("     补法：--registry <信源表.xlsx>   逐家遍历，覆盖名录内媒体的全部报道")
+            print("     补法：--acled-env <.env>  （推荐）ACLED，可系统性补非致命事件")
+            print("           --registry <信源表.xlsx>   逐家遍历，覆盖名录内媒体的全部报道")
             print("           --nonlethal --search-cmd ...  未遂专项检索")
             print("     交付时必须附「覆盖边界声明」说明这个缺口。")
 
@@ -359,6 +371,27 @@ def main():
             results.append(("采集(信源遍历)", ok, out))
             if ok and os.path.isfile(reg_out):
                 parts.append(reg_out)
+
+        # ---- 并联：ACLED（唯一能系统性补非致命事件的源）----
+        # UCDP 的门槛是「造成死亡」，非致命与未遂全靠这一路。
+        # 实测 2025-08：ACLED 全球 25000 条里 81.8% 是零死亡事件，UCDP 一条都不给。
+        if a.acled or a.acled_env:
+            acl_out = a.acled or os.path.join(od, "01d_acled.jsonl")
+            if a.acled and os.path.isfile(a.acled):
+                print("\n  使用已有 ACLED 文件：%s" % a.acled)
+                parts.append(a.acled)
+            elif a.acled_env:
+                rargs = [os.path.join(HERE, "harvest_acled.py"),
+                         "--month", a.month, "--out", acl_out,
+                         "--env-file", a.acled_env,
+                         "--max-pages", str(a.acled_max_pages)]
+                ok, out = run_step("采集：ACLED（补非致命）", rargs,
+                                   expect=0, allow_fail=True)
+                results.append(("采集(ACLED)", ok, out))
+                if ok and os.path.isfile(acl_out):
+                    parts.append(acl_out)
+            else:
+                print("\n  ⚠️  --acled 指向的文件不存在：%s" % a.acled)
 
         # ---- 并联：未遂/非致命专项 ----
         # 口径要求「预谋被破获、未遂、零伤亡的案子照常计入」，

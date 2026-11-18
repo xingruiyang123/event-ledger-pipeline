@@ -291,11 +291,50 @@ python scripts/run_pipeline.py --month 2025-08 \
 | 通道 | 管什么 | 不管什么 |
 |---|---|---|
 | --ucdp | 全球致命有组织暴力，带分方死亡数 | 非致命、未遂、图谋 |
+| --acled / --acled-env | **政治暴力，不以死亡为门槛**，含零死亡事件；actor1/actor2 语义明确（谁先动手） | 抗议/骚乱类要过滤；不含未遂图谋 |
 | --registry | 名录内媒体当月报道的一切（含非致命） | 名录外的机构、小语种媒体 |
 | --nonlethal | 被挫败的图谋、未遂、零死亡 | 正常发生的袭击 |
 
+**ACLED 是补非致命最有效的一路**。实测 2025-08：
+
+| 指标 | UCDP | ACLED（已过滤暴力类型） |
+|---|---|---|
+| 该月记录 | 2361 条 | 4831 条（仅 2 页，全量更多） |
+| 零死亡事件 | **0 条** | **3004 条（62.2%）** |
+| 含 Terrorist 标签 | — | 1301 条 |
+| 抽样 300 条零死亡判定 | — | 计入 14 条（4.7%） |
+
+按 4.7% 的计入率推算，光 2 页 ACLED 就能补出约 140 条非致命恐袭 —— 
+这是只用 UCDP 时**完全拿不到**的部分。
+
+ACLED 的另一个好处：ctor1 是发起方、ctor2 是承受方，语义明确。
+UCDP 的 side_a/side_b 只表示「冲突双方」，看不出谁先动手 —— 这正是
+2026-07 真值集里 60 多条 ctor 被写成 Government of X、判定链判反的原因。
+
+**ACLED 也不是全知**：它的覆盖在俄乌、中东极密集，其他地区稀疏。
+抽样 300 条零死亡事件里，113 条是俄军、42 条是乌军 —— 拿这些做「全球恐袭」会严重偏斜。
+
 **没有 UCDP 也能跑**：只给 --registry 时流水线不终止，改为逐家遍历出候选
 （条数会少，但每一条都能追到报道）。
+
+### ACLED 接入的两个坑（2026-11 实测）
+
+`ash
+python scripts/harvest_acled.py --month 2025-08 --out 候选_acled.jsonl \
+    --env-file .env        # 内含 ACLED_USERNAME / ACLED_PASSWORD
+`
+
+1. **page 参数已废弃。** 传了直接 400，返回
+   The page parameter is no longer supported. Pass the next_cursor value...。
+   分页要用响应里的 
+ext_cursor（整数），下一请求传 cursor=<值>，直到它为空。
+   **网上多数教程和你手上旧脚本用的还是 page，现在全部跑不通。**
+2. **必须过滤事件类型。** ACLED 收「政治暴力与抗议」，2025-08 全球 25000 条里
+   12769 条是 Protests/Riots/Strategic developments，混进台账会把报表撑成抗议记录表。
+   脚本默认只留 Explosions/Remote violence、Battles、Violence against civilians
+   三类，--event-types all 可关掉过滤。
+
+凭据免费注册：https://developer.acleddata.com/ 。不写进脚本、不进仓库。
 
 ### 每版必出「覆盖边界声明」
 
