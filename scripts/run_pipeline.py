@@ -294,6 +294,8 @@ def main():
                     help="含 ACLED_USERNAME/PASSWORD 的 .env。给了就自动跑 ACLED 采集")
     ap.add_argument("--acled-max-pages", type=int, default=40,
                     help="ACLED 最多翻多少页（每页 5000 条）")
+    ap.add_argument("--nonlethal-top", type=int, default=20,
+                    help="未遂专项查事件最多的前 N 个国家（默认 20，每国 3 条检索式）")
     ap.add_argument("--nonlethal", action="store_true",
                     help="额外开一路「未遂/非致命专项检索」，需同时给 --search-cmd")
     a = ap.parse_args()
@@ -437,62 +439,33 @@ def main():
         # ---- 并联：未遂/非致命专项 ----
         # 口径要求「预谋被破获、未遂、零伤亡的案子照常计入」，
         # 而 UCDP 只收造成死亡的事件 —— 这一类只能靠定向检索补。
-        nonlethal_queries = []
+        # 未遂通道改用 harvest_nonlethal.py：按国家 × 语言组合出 2-3 条检索式。
+        # 原先只有 3 条全球检索式，不带国家也不带月份英文名，召回很散；
+        # 实测 2025-08 那 3 条一条未遂都没收进来。
+        nl_out2 = os.path.join(od, "01e_未遂.jsonl")
         if a.nonlethal:
             if not a.search_cmd:
                 print("\n  ⚠️  --nonlethal 需要同时给 --search-cmd，已跳过")
             else:
-                nonlethal_queries = [
-                    "%s foiled terrorist plot thwarted attack" % a.month,
-                    "%s terror plot busted arrested suspects bomb" % a.month,
-                    "%s 未遂 挫败 恐怖袭击 图谋" % a.month,
-                ]
-
-        if nonlethal_queries:
-            nl_out = os.path.join(od, "01c_nonlethal.jsonl")
-            nl_rows, nl_seen = [], set()
-            for q in nonlethal_queries:
-                cmd = a.search_cmd.replace("{q}", q)
-                try:
-                    pr = subprocess.run(cmd, shell=True, capture_output=True,
-                                        timeout=120, env=_clean_env())
-                    raw = (pr.stdout or b"").decode("utf-8", "replace")
-                except Exception as e:  # noqa: BLE001
-                    print("    专项检索失败：%s" % str(e)[:50])
-                    continue
-                if not raw.strip():
-                    continue
-                try:
-                    d = json.loads(raw)
-                except Exception:  # noqa: BLE001
-                    continue
-                for r0 in (d.get("results") or []):
-                    u = r0.get("url") or ""
-                    t = r0.get("title") or ""
-                    if not u or u in nl_seen:
-                        continue
-                    # 只要明确是「未遂/被挫败」的，正常发生的袭击这路不碰
-                    if not re.search(r"(?i)(foil|thwart|bust|plot|未遂|挫败|图谋|prevent)", t + " " + u):
-                        continue
-                    nl_seen.add(u)
-                    dt = str(r0.get("date") or "")[:10]
-                    if not dt:
-                        m2 = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})/", u)
-                        if m2:
-                            dt = "%s-%02d-%02d" % (m2.group(1), int(m2.group(2)), int(m2.group(3)))
-                    nl_rows.append({
-                        "source": "nonlethal", "date": dt, "country": "",
-                        "place": "", "summary": t, "deaths": None, "injured": None,
-                        "actor_a": "", "actor_b": "", "act_type": "",
-                        "url": u, "raw_id": hashlib.md5(u.encode()).hexdigest()[:12],
-                        "note": "未遂/被挫败专项通道",
-                    })
-            if nl_rows:
-                with open(nl_out, "w", encoding="utf-8") as f:
-                    for r0 in nl_rows:
-                        f.write(json.dumps(r0, ensure_ascii=False) + "\n")
-                parts.append(nl_out)
-            print("    未遂专项：%d 条" % len(nl_rows))
+                nargs = [os.path.join(HERE, "harvest_nonlethal.py"),
+                         "--month", a.month, "--out", nl_out2,
+                         "--search-cmd", a.search_cmd,
+                         "--top", str(a.nonlethal_top)]
+                # 用已采到的 UCDP 候选来决定查哪些国家。
+                # 不能等 --from cand：那一步在合并之后，此刻还没生成，
+                # 脚本会因为既没有 --from 也没有 --countries 直接退出。
+                _src_for_country = os.path.join(od, "01a_ucdp.jsonl")
+                if os.path.isfile(_src_for_country):
+                    nargs += ["--from", _src_for_country]
+                elif os.path.isfile(cand):
+                    nargs += ["--from", cand]
+                else:
+                    nargs += ["--countries", "Nigeria,Somalia,Pakistan,Syria,Iraq,Afghanistan"]
+                ok, out = run_step("采集：未遂/被挫败专项", nargs,
+                                   expect=0, allow_fail=True)
+                results.append(("采集(未遂)", ok, out))
+                if ok and os.path.isfile(nl_out2):
+                    parts.append(nl_out2)
 
         # ---- 合并多源 ----
         contrib = []

@@ -178,7 +178,7 @@ FOILED_PLOT = re.compile(
     r"(?:major\s+|deadly\s+|another\s+)?"
     r"(?:terror(?:ist)?|bomb|suicide|attack|plot|conspiracy|plan)|"
     r"(?:plot|plan|conspiracy)\s+(?:was\s+|has\s+been\s+)?(?:foiled|thwarted|busted|disrupted)|"
-    r"挫败.{0,12}(?:图谋|恐袭|袭击|爆炸|阴谋)|破获.{0,12}(?:图谋|恐怖)|粉碎.{0,12}(?:图谋|阴谋))")
+    r"挫败.{0,30}(?:图谋|恐袭|袭击|爆炸|阴谋|恐攻)|破获.{0,30}(?:图谋|恐怖|恐袭)|粉碎.{0,30}(?:图谋|阴谋|袭击)|阻止.{0,20}(?:恐袭|恐怖袭击)|(?:terror(?:ist)?\s+)?(?:attack|plot|bombing|assassination)\s+(?:was\s+|has\s+been\s+)?(?:foiled|thwarted|prevented|disrupted))")
 
 # 「恐怖分子被击毙」是反恐战果，不是恐袭
 TERROR_KILLED = re.compile(
