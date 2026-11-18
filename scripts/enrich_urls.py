@@ -419,8 +419,10 @@ def _deaths_in_text(text, deaths):
     # 光有数字不够：必须挨着死亡词才算数。
     # 实测踩过：「nearly 90 attacks in a day」被当成「90 人死亡」，
     # 而事件实际是 90 死 —— 数字对上了，事情完全不是一件。
-    DYING = r"(?i)(killed|dead|died|deaths?|fatalities|martyrs|casualt|"
-    DYING += r"死亡|遇难|丧生|罹难)"
+    DYING = r"(?i)(killed|killing|kill|dead|died|death|deaths|fatalities|"
+    DYING += r"martyrs?|casualt|slain|slay|assassinat|massacr|bodies|corpses?|"
+    DYING += r"shot dead|found dead|lost (?:his|their) li(?:fe|ves)|"
+    DYING += r"死亡|遇难|丧生|罹难|身亡|被杀|击毙|打死|遗体)"
     ok = False
     for mt in re.finditer(r"\b(\d{1,5})\b", t):
         v = int(mt.group(1))
@@ -431,9 +433,14 @@ def _deaths_in_text(text, deaths):
         # 数字到 killed 隔 25 字符被切断后漏判）；40 太宽
         #（「nearly 90 attacks in a day ... casualties」把 casualties 圈进来，误判）。
         # 按词数卡正好对上「N killed」「N people dead」「over N women killed」这类表达。
+        # 前后都要看。实测漏判：「assassinate two policemen」——
+        # 死亡词 assassinate 在数字前面，只往后看就判成「没提死亡」。
+        # 这类标题很常见（「Gunmen kill two policemen」「Two soldiers killed」）。
         tail = t[mt.end():mt.end() + 90]
-        words6 = re.findall(r"[a-z\u4e00-\u9fff]+", tail)[:6]
-        if re.search(DYING, " ".join(words6)):
+        head = t[max(0, mt.start() - 50):mt.start()]
+        w_after = re.findall(r"[a-z\u4e00-\u9fff]+", tail)[:6]
+        w_before = re.findall(r"[a-z\u4e00-\u9fff]+", head)[-4:]
+        if re.search(DYING, " ".join(w_after) + " " + " ".join(w_before)):
             ok = True
             break
     if not ok:
@@ -441,8 +448,11 @@ def _deaths_in_text(text, deaths):
         for w, v in NUM_WORDS.items():
             if lo <= v <= hi and re.search(r"\b%s\b" % w, t):
                 for mm2 in re.finditer(r"\b%s\b" % w, t):
-                    seg = t[max(0, mm2.start() - 40):mm2.end() + 40]
-                    if re.search(DYING, seg):
+                    _t2 = t[mm2.end():mm2.end() + 90]
+                    _h2 = t[max(0, mm2.start() - 50):mm2.start()]
+                    _wa = re.findall(r"[a-z]+", _t2)[:6]
+                    _wb = re.findall(r"[a-z]+", _h2)[-4:]
+                    if re.search(DYING, " ".join(_wa) + " " + " ".join(_wb)):
                         ok = True
                         break
                 if ok:
@@ -661,7 +671,18 @@ def build_query(rec):
     if frag:
         parts = []
         cty = str(rec.get("国家") or rec.get("country") or "").strip()
+        # 国家名必须转英文再进检索式。
+        # 台账里国家名中英混杂（"Burkina Faso" 和 "布基纳法索" 并存），
+        # 中文国名 + 英文地名 = 检索后端一个词都匹配不上。
+        # 实测：Burkina Faso 27 条强中率 7%，布基纳法索 17 条 **0%**；
+        #       Nigeria 15 条 27%，尼日利亚 14 条 **0%**。
         if cty:
+            _k = cty.strip().lower()
+            try:
+                from audit_coverage import ZH_TO_EN as _Z
+                cty = _Z.get(_k, cty)
+            except Exception:  # noqa: BLE001
+                pass
             parts.append(cty)
         plc = str(rec.get("地点") or rec.get("place") or "").strip()
         # 地点里常有坐标串，只取前两段文字
