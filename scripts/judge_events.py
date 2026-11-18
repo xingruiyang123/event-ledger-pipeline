@@ -94,6 +94,12 @@ COMMUNAL = re.compile(
 LATAM = {"巴西", "哥伦比亚", "墨西哥", "厄瓜多尔", "危地马拉", "洪都拉斯",
          "萨尔瓦多", "委内瑞拉", "秘鲁", "玻利维亚", "海地", "多米尼加",
          "巴拿马", "哥斯达黎加", "尼加拉瓜", "阿根廷", "巴拉圭", "智利"}
+
+# 同一批国家的英文/西语写法。踩过的坑：台账里国名有时是英文（如「Costa Rica」），
+# 只用中文名集合会让拉美包容规则漏掉整个国家。
+LATAM_EN = {"costa rica", "brazil", "colombia", "mexico", "ecuador", "guatemala",
+            "honduras", "el salvador", "venezuela", "peru", "bolivia", "haiti",
+            "dominican republic", "panama", "nicaragua", "argentina", "paraguay", "chile"}
 POLITICAL_ARMED = re.compile(
     r"(?i)(\bELN\b|\bFARC\b|\bEPL\b|dissiden|guerrilla|民族解放军|"
     r"Autodefensas Unidas|\bAUC\b|Sendero Luminoso|光辉道路)")
@@ -171,7 +177,7 @@ def _num_from_text(txt):
     return None
 
 
-def _from_text(txt, civ, deaths, cty, t):
+def _from_text(txt, civ, deaths, cty, t, act_hint=""):
     """行为体判不了时，用摘要做兜底判定。返回 (verdict, chain, note) 或 None。
 
     顺序很重要：排除信号 > 政府行动 > 袭击信号。
@@ -184,7 +190,10 @@ def _from_text(txt, civ, deaths, cty, t):
         return ("不计入", "N1",
                 "摘要显示为社区/农牧/土地冲突或普通刑案，非恐怖主义暴力")
 
-    has_atk = bool(SRC_ATTACK.search(txt))
+    # 采集层已从标题抽出动作类型（如「自杀式袭击」「绑架」）时也算袭击信号。
+    # 新闻标题不是 UCDP 那种长句，光靠 SRC_ATTACK 覆盖不到：
+    # 实测 7 条典型标题有 4 条匹配不上、直接落「不计入」。
+    has_atk = bool(SRC_ATTACK.search(txt)) or bool(act_hint)
     has_gov = bool(SRC_GOV_OP.search(txt))
 
     # 两者都有 -> 大概率是政府行动（袭击者被击毙之类）
@@ -213,9 +222,11 @@ def judge(rec, min_deaths=1):
     b = rec.get("actor_b", "") or ""
     txt = " ".join([rec.get("summary", "") or "", rec.get("place", "") or "",
                     a, b, str(rec.get("extra", {}).get("conflict", "") or "")])
-    deaths = rec.get("deaths")
+    deaths_raw = rec.get("deaths")
+    # 未知 ≠ 0。新闻标题常不写死亡数，把它当 0 会让整批候选被判「无死亡记录」。
+    deaths_unknown = deaths_raw is None or str(deaths_raw).strip() == ""
     try:
-        deaths = int(deaths)
+        deaths = int(deaths_raw)
     except Exception:  # noqa: BLE001
         deaths = 0
     civ = rec.get("extra", {}).get("deaths_civilians")
@@ -231,17 +242,21 @@ def judge(rec, min_deaths=1):
         r"(?i)(store employee|shop employee|hardware store|found dead|"
         r"shot dead in|killed in front of|inside (?:his|her|a) (?:home|house|car)|"
         r"settling of scores|barber|street vendor|hitman)")
-    if (cty in LATAM and not POLITICAL_ARMED.search(a + " " + b + " " + txt)
+    if ((cty in LATAM or cty.strip().lower() in LATAM_EN) and not POLITICAL_ARMED.search(a + " " + b + " " + txt)
             and (t == "2" or LATAM_STREET.search(txt))):
         return "不计入", "N2", (
             "拉美区域的有组织犯罪/街头凶杀：UCDP 在该区域把帮派与刑案记为单方面暴力，"
             "不属恐怖主义")
 
-    # 脱敏行为体 / 分方死亡缺失：先用摘要兜底判定，判不了才交人
-    if is_anon(a) or is_anon(b):
-        v = _from_text(txt, civ, deaths, cty, t)
+    # 脱敏行为体 / 行为体全空 / 分方死亡缺失：先用摘要兜底判定，判不了才交人
+    # 行为体空串必须和脱敏同等对待 —— 逐家遍历来的新闻候选两个字段都是空的，
+    # 漏掉这个分支会让整批候选跳过兜底、直接落「需人工判」（实测 109/186）。
+    if is_anon(a) or is_anon(b) or (not a.strip() and not b.strip()):
+        v = _from_text(txt, civ, deaths, cty, t, rec.get("act_type") or "")
         if v:
             return v
+        if deaths == 0 and civ == 0 and deaths_unknown:
+            return "需人工判", "-", "行为体脱敏、未披露死亡数，需看原文"
         if deaths == 0 and civ == 0:
             return "不计入", "兜底", "行为体脱敏且无死亡记录"
         return "需人工判", "-", ("行为体被 UCDP 脱敏（%s/%s），摘要无足够信号；"
@@ -363,6 +378,8 @@ def judge(rec, min_deaths=1):
         return "计入", "P4", "武装冲突中平民死亡 %d" % civ
 
     # ===== 步3 兜底 =====
+    if deaths == 0 and deaths_unknown:
+        return "需人工判", "-", "未披露死亡数（新闻标题常见），需看原文补"
     if deaths == 0:
         return "不计入", "兜底", "无死亡记录"
     # 有死亡但性质判不出来 → 交人
@@ -447,8 +464,15 @@ def main():
     for r in rows:
         # 保守去重：国家+日期+死亡数+地点 都相同才算同一事件。
         # 只按 国+日+死 会把「同一天同国两起都死1人」误合并（实测去掉 872 条，过激）。
-        key = (r.get("country"), r.get("date"), r.get("deaths"),
-               (r.get("place") or "").strip().lower()[:40])
+        _cty, _pl = r.get("country"), r.get("place")
+        if not _cty and not _pl:
+            # 国家与地点都没填时（逐家遍历来的新闻候选就是这样），
+            # 三字段做 key 会把「同一天、同死亡数」的所有事件并成一条
+            # （实测 148 条被并成 53 条）。改用摘要前缀区分。
+            _summ = re.sub(r"\W+", "", (r.get("summary") or ""))[:30].lower()
+            key = ("__nosrc__", r.get("date"), r.get("deaths"), _summ)
+        else:
+            key = (_cty, r.get("date"), r.get("deaths"), _pl)
         if key in seen:
             continue
         seen.add(key)

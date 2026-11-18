@@ -27,6 +27,7 @@ license: MIT
 | **今年各月**（含最近月份） | UCDP **累计候选集**（13MB，今年 01→最新月） | 每月 1400–2100 条 | 2026-08：1860 条 → 判定后 **158 条** |
 | 专题样本 | 公开新闻索引 + 逐源点名 | 十几至几十 | 2026-08 维基：**8 条** |
 | 快速摸底 | 维基「当前事件」日历 | 十几 | 2026-08：99 条候选 |
+| **要证明遍历性** | **信源表逐家遍历**（harvest_source_registry.py） | 按名录家数 | 2026-08 抽 50 家：1.7 分钟 → 184 条候选，38 家有线索 |
 
 **UCDP 是月度台账的首选**（免费、可离线、有分方死亡数、非洲覆盖好）：
 
@@ -34,6 +35,21 @@ license: MIT
 curl -C - -o ged261.zip https://ucdp.uu.se/downloads/ged/ged261-csv.zip   # 39MB，断点续传
 python scripts/harvest_ucdp.py --ged ged261.zip --month 2025-08 --out 候选.jsonl
 ```
+
+**要回答「你名录里 1446 家跑了多少」时，用逐家遍历**（UCDP 答不了这个问题 ——
+它的收录标准是别人定的）：
+
+`ash
+python scripts/harvest_source_registry.py \
+    --registry 信源表.xlsx --month 2026-08 --out 候选_遍历.jsonl \
+    --status-out 信源遍历状态.xlsx \
+    --search-cmd 'D:/DSH/sx.cmd search "{q}" --task auto --json'
+`
+
+它给每家落一个五态（有线索／零结果／无事件／取不到内容／未检索），产出一张可复核的
+遍历状态表。**「取不到内容」不等于「该地区无事件」**，报告里必须分开。
+详见 
+eference/02-搜集.md 第四节。
 
 > ⚠️ **候选集有两个版本，选错会得出「某月只有几十条」的假象：**
 >
