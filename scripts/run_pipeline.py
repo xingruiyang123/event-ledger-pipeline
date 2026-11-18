@@ -59,6 +59,85 @@ def _clean_env():
     return env
 
 
+def _ged_months(path):
+    """扫一个 GED 文件（zip 或 csv），返回它覆盖的月份集合。"""
+    import csv as _csv
+    import zipfile as _zip
+    out = set()
+    try:
+        if str(path).lower().endswith(".zip"):
+            z = _zip.ZipFile(path)
+            cs = [n for n in z.namelist() if n.lower().endswith(".csv")]
+            if not cs:
+                return out
+            fobj = z.open(cs[0])
+            txt = io.TextIOWrapper(fobj, encoding="utf-8", errors="replace")
+            for row in _csv.DictReader(txt):
+                d = str(row.get("date_start") or row.get("date") or "")
+                if len(d) >= 7:
+                    out.add(d[:7])
+        else:
+            fobj = io.open(path, encoding="utf-8", errors="replace")
+            for row in _csv.DictReader(fobj):
+                d = str(row.get("date_start") or row.get("date") or "")
+                if len(d) >= 7:
+                    out.add(d[:7])
+    except Exception:  # noqa: BLE001
+        return out
+    return out
+
+
+def resolve_ucdp_auto(month, data_dir, here):
+    """找一个覆盖 month 的 UCDP 文件；没有就下载候选集再找。"""
+    import glob as _glob
+    import subprocess as _sp
+
+    def scan():
+        cands = []
+        for pat in ("*.zip", "*.csv"):
+            cands += _glob.glob(os.path.join(data_dir, pat))
+        hits = []
+        for f in cands:
+            low = os.path.basename(f).lower()
+            if "ged" not in low and "ucdp" not in low:
+                continue
+            ms = _ged_months(f)
+            if month in ms:
+                hits.append((f, len(ms)))
+        return hits
+
+    print("")
+    print("  自动选源：目标 %s，扫描 %s" % (month, data_dir))
+    if not os.path.isdir(data_dir):
+        os.makedirs(data_dir, exist_ok=True)
+    hits = scan()
+    if hits:
+        hits.sort(key=lambda x: x[1])   # 覆盖月份少的优先（增量包更快）
+        print("  已找到覆盖该月的文件：%s" % os.path.basename(hits[0][0]))
+        return hits[0][0]
+
+    print("  本地没有覆盖 %s 的文件 → 下载 UCDP 月度候选集" % month)
+    try:
+        r = _sp.run([PY, os.path.join(here, "fetch_ucdp.py"),
+                     "--candidate", "--outdir", data_dir],
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", env=_clean_env(), timeout=900)
+        for line in (r.stdout or "").split("\n"):
+            if line.strip() and "RequestsDependencyWarning" not in line:
+                print("    " + line.strip()[:100])
+    except Exception as e:  # noqa: BLE001
+        print("  下载失败：%s" % str(e)[:100])
+        return None
+
+    hits = scan()
+    if hits:
+        hits.sort(key=lambda x: x[1])
+        print("  下载后可用：%s" % os.path.basename(hits[0][0]))
+        return hits[0][0]
+    print("  下载完成但仍没有覆盖 %s 的文件 —— 该月可能还没发布" % month)
+    return None
+
+
 def run_step(name, args, expect=0, allow_fail=False, timeout=600):
     """跑一步，返回 (ok, 输出)。"""
     print("\n" + "─" * 70)
@@ -265,6 +344,12 @@ def write_coverage_note(path, month, contributions, judged, ledger_rows):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", required=True, help="YYYY-MM")
+    ap.add_argument("--ucdp-auto", action="store_true",
+                    help="自动找覆盖目标月份的 UCDP 文件，没有就下载月度候选集。"
+                         "UCDP 年度版滞后约一年（GED 26.1 只到 2025-12），"
+                         "跑当月台账必须用候选集，否则会静默得到 0 条")
+    ap.add_argument("--data-dir", default=None,
+                    help="数据源目录（--ucdp-auto 在这里找，默认 ./数据源）")
     ap.add_argument("--ucdp", default=None, help="正式 GED 的 csv/zip（查历史月份）")
     ap.add_argument("--ucdp-candidate", default=None, help="候选集 csv（只查最新月份）")
     ap.add_argument("--wiki-only", action="store_true", help="没有 UCDP，用维基兜底")
@@ -318,10 +403,37 @@ def main():
     # ============ 阶段 0：数据源（缺就自动下）============
     if a.stage in ("harvest", "all") and not a.wiki_only:
         have = None
-        if a.ucdp and os.path.isfile(a.ucdp):
+
+        # --ucdp-auto：先确认给的文件真的覆盖目标月份。
+        # 不覆盖就自动找/下载 —— 这是最容易踩的坑：
+        # 用户拿 ged261.zip（到 2025-12）跑 2026-07，会静默得到 0 条，
+        # 然后以为是「这个月没发生恐袭」。
+        if a.ucdp_auto:
+            _dd = a.data_dir or os.path.join(od, "数据源")
+            _af = resolve_ucdp_auto(a.month, _dd, HERE)
+            if _af:
+                have = _af
+                a.ucdp = _af
+                a.ucdp_candidate = None
+
+        if not have and a.ucdp and os.path.isfile(a.ucdp):
             have = a.ucdp
-        elif a.ucdp_candidate and os.path.isfile(a.ucdp_candidate):
+            _ms = _ged_months(a.ucdp)
+            if _ms and a.month not in _ms:
+                print("")
+                print("  ⚠️  %s 不覆盖 %s（该文件覆盖 %s ~ %s）"
+                      % (os.path.basename(a.ucdp), a.month,
+                         min(_ms), max(_ms)))
+                print("      用它会得到 0 条候选，但这不是「该月没事件」。")
+                print("      处置：加 --ucdp-auto 自动改用月度候选集；")
+                print("            或手动 --ucdp-candidate <候选集.csv>")
+        elif not have and a.ucdp_candidate and os.path.isfile(a.ucdp_candidate):
             have = a.ucdp_candidate
+            _ms = _ged_months(a.ucdp_candidate)
+            if _ms and a.month not in _ms:
+                print("")
+                print("  ⚠️  候选集不覆盖 %s（覆盖 %s ~ %s）"
+                      % (a.month, min(_ms), max(_ms)))
         if not have:
             print("\n未提供可用的 UCDP 文件，尝试自动下载候选集（1.6MB，轻量）…")
             ds = os.path.join(od, "数据源")
