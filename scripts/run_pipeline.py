@@ -30,8 +30,10 @@
 退出码：0 = 全链路通过 | 2 = 有门禁未通过 | 1 = 无法判定
 """
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -90,6 +92,138 @@ def run_step(name, args, expect=0, allow_fail=False, timeout=600):
     return ok, out
 
 
+def merge_candidates(paths, out_path):
+    """把多个源的候选合并成一个池，带 source 标记。
+
+    为什么必须合并而不是「选一个最好的源」：每个源都有天然盲区。
+      · UCDP   只收「有组织暴力且造成死亡」，非致命、未遂、图谋都不在
+      · 信源表  只覆盖名录里的媒体，小国小语种媒体拿不到
+      · 未遂专项 只找被挫败的图谋，正常发生的袭击它不找
+    单源交付必然有系统性缺口，合并后至少能把缺口摊开说清楚。
+    """
+    import hashlib
+    seen, rows = set(), []
+    for p in paths:
+        if not p or not os.path.isfile(p):
+            continue
+        tag = os.path.splitext(os.path.basename(p))[0]
+        n = 0
+        with open(p, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except Exception:  # noqa: BLE001
+                    continue
+                # 跨源去重：同 URL 或（同国+同日+同死亡数+摘要前缀）
+                url = (r.get("url") or "").strip()
+                if url:
+                    key = ("u", url)
+                else:
+                    import re as _re
+                    summ = _re.sub(r"\W+", "", (r.get("summary") or ""))[:30].lower()
+                    key = ("k", r.get("country"), r.get("date"), r.get("deaths"), summ)
+                if key in seen:
+                    # 已存在：把来源并进去，便于统计各源贡献
+                    for ex in rows:
+                        if ex.get("_key") == key:
+                            srcs = set((ex.get("source") or "").split("+"))
+                            srcs.add(r.get("source") or tag)
+                            ex["source"] = "+".join(sorted(x for x in srcs if x))
+                            break
+                    continue
+                seen.add(key)
+                r["_key"] = key
+                if not r.get("source"):
+                    r["source"] = tag
+                rows.append(r)
+                n += 1
+        print("    %-22s %4d 条" % (tag, n))
+    for r in rows:
+        r.pop("_key", None)
+    with open(out_path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    return len(rows)
+
+
+def write_coverage_note(path, month, contributions, judged, ledger_rows):
+    """生成覆盖边界声明。
+
+    为什么每次都要出这份：台账的数字看着像「全球恐怖袭击总量」，其实不是。
+    不写清楚，读的人会拿它当普查数据用，而这个误用无法从表里看出来。
+    """
+    lines = []
+    lines.append("# 覆盖边界声明 · %s" % month)
+    lines.append("")
+    lines.append("> 本文件由流水线自动生成。它的作用是说明：这份台账覆盖了什么、")
+    lines.append("> 没覆盖什么、哪些数字不能怎么用。**不要省略本文件直接交付台账。**")
+    lines.append("")
+    lines.append("## 一、各数据源贡献")
+    lines.append("")
+    lines.append("| 数据源 | 候选条数 | 覆盖范围 | 天然盲区 |")
+    lines.append("|---|---|---|---|")
+    KNOWN = {
+        "ucdp": ("UCDP GED", "全球有组织暴力，含分方死亡数",
+                 "**只收造成死亡的致命事件**；非致命袭击、未遂、被挫败的图谋不在内"),
+        "01_候选": ("UCDP GED", "同上", "同上"),
+        "registry": ("信源表逐家遍历", "名录内媒体当月报道的全部相关事件（含非致命）",
+                     "只覆盖名录里的机构；小国、小语种、无网站的媒体拿不到"),
+        "registry_": ("信源表逐家遍历", "同上", "同上"),
+        "nonlethal": ("未遂/非致命专项检索", "被挫败的图谋、未遂袭击、零死亡事件",
+                      "只找「未遂/被挫败」这一类的报道；正常发生的袭击它不找"),
+        "wiki": ("维基当前事件日历", "重大事件（偏欧美）", "非洲小规模袭击几乎不进"),
+        "gdelt": ("GDELT", "全球新闻线索", "粒度粗，只作线索，不能直接进台账"),
+    }
+    for name, n in contributions:
+        k = None
+        for kk in KNOWN:
+            if name.startswith(kk) or kk in name:
+                k = kk
+                break
+        label, scope, blind = KNOWN.get(k, (name, "—", "—"))
+        lines.append("| %s | %d | %s | %s |" % (label, n, scope, blind))
+    lines.append("")
+    lines.append("## 二、三条不能做的事")
+    lines.append("")
+    lines.append("1. **不能把本台账的数字当成全球恐怖袭击总量。**")
+    lines.append("   它是「公开可核实、且被上述数据源收录」的那一部分。")
+    lines.append("2. **不能因为某个事件不在表里，就断言它没发生。**")
+    lines.append("   缺记录有三个常见原因：数据源不收（非致命/未遂）、媒体没报、我们没检索到。")
+    lines.append("   这三者的区别，见本文件第三节。")
+    lines.append("3. **不能拿月度条数做烈度排名。**")
+    lines.append("   报道密度在地区之间差一个量级：巴基斯坦、萨赫勒报道充分，")
+    lines.append("   其他地区明显不足，条数更多反映「被报道的程度」，不是「发生的程度」。")
+    lines.append("")
+    lines.append("## 三、没覆盖到的部分怎么区分")
+    lines.append("")
+    lines.append("| 情形 | 判定依据 | 报告里怎么写 |")
+    lines.append("|---|---|---|")
+    lines.append("| 数据源不收 | 非致命、未遂、零死亡 | 「本口径要求收录未遂，该月未遂类仅 X 条，覆盖不足」 |")
+    lines.append("| 媒体没报 | 检索到零结果 | 「该地区该时段无相关报道」 |")
+    lines.append("| 我们没检索到 | 信源表里标「未检索」「取不到内容」 | 「该源未取到内容」，**不能写成「无事件」** |")
+    lines.append("")
+    lines.append("## 四、本月的实际数值")
+    lines.append("")
+    lines.append("- 候选池合并后：见上表合计")
+    lines.append("- 判定后进台账：**%d** 条" % ledger_rows)
+    lines.append("- 非致命（死亡=0）事件：**%d** 条" % (judged.get("zero_death", 0)))
+    lines.append("- 未遂/被挫败事件：**%d** 条" % (judged.get("attempted", 0)))
+    lines.append("")
+    lines.append("> 若「非致命」与「未遂」两条接近 0，说明这一版**几乎只覆盖了致命事件**，")
+    lines.append("> 与口径要求的「未遂照常计入」有明显差距。补法是加 --registry 走逐家遍历，")
+    lines.append("> 或加 --search-cmd 开未遂专项通道。")
+    lines.append("")
+    d = os.path.dirname(path)
+    if d and not os.path.isdir(d):
+        os.makedirs(d, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+    return path
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--month", required=True, help="YYYY-MM")
@@ -105,6 +239,12 @@ def main():
                     help="补链用的搜索命令模板（{q} 占位）。给了才会补「信息来源URL」")
     ap.add_argument("--source-kind", default="structured",
                     choices=["news", "structured", "mixed"])
+    ap.add_argument("--registry", default=None,
+                    help="信源表 xlsx。给了就并行走「逐家遍历」，补 UCDP 收不到的非致命/未遂事件")
+    ap.add_argument("--registry-limit", type=int, default=0,
+                    help="逐家遍历只跑前 N 家（0=全部）。先小样本试时用")
+    ap.add_argument("--nonlethal", action="store_true",
+                    help="额外开一路「未遂/非致命专项检索」，需同时给 --search-cmd")
     a = ap.parse_args()
 
     od = os.path.abspath(a.outdir)
@@ -144,19 +284,23 @@ def main():
     if a.stage in ("harvest", "all"):
         if a.ucdp or a.ucdp_candidate:
             args = [os.path.join(HERE, "harvest_ucdp.py"), "--month", a.month,
-                    "--out", cand, "--min-items", str(a.min_events)]
+                    "--out", (os.path.join(od, "01a_ucdp.jsonl")
+                              if (a.registry or a.nonlethal) else cand),
+                    "--min-items", str(a.min_events)]
             args += (["--ged", a.ucdp] if a.ucdp else ["--candidate", a.ucdp_candidate])
             ok, out = run_step("采集：UCDP", args, expect=0, allow_fail=True)
             results.append(("采集(UCDP)", ok, out))
         # 采集失败必须立即停：否则 0 条候选会一路空转到底，
         # 最后只报「找不到判定结果」，让人以为是自己少跑了某步。
-        if not ok:
+        if not ok and not a.registry:
             print("")
             print("  采集失败，流水线终止。上面的诊断已说明原因。")
             print("  全链路结果：")
             for _n, _o, _ in results:
                 print("    %-18s %s" % (_n, "✅" if _o else "❌"))
-            return 2
+            if not a.registry:
+                return 2
+            print("  但已配置 --registry，继续走逐家遍历补数据。")
         if not ok:
                 # 典型误用：拿候选集查历史月份
                 if "候选集" in out and "历史月份" in out:
@@ -176,6 +320,125 @@ def main():
             results.append(("采集(维基)", ok, out))
             print("\n  ⚠️  提醒：维基偏欧美，非洲小规模袭击几乎不进。")
             print("     用它做月度台账会系统性偏斜，交付说明里必须写清。")
+
+        # ---- 单源告警：只用 UCDP 必然有系统性缺口，必须说出来 ----
+        if not a.registry and not a.nonlethal:
+            print("")
+            print("  ⚠️  只用了 UCDP 一个源，有两类事件会系统性缺失：")
+            print("     · 非致命袭击（零死亡）—— UCDP 只收造成死亡的有组织暴力")
+            print("     · 未遂/被挫败的图谋 —— 口径要求计入，但 UCDP 不收")
+            print("     补法：--registry <信源表.xlsx>   逐家遍历，覆盖名录内媒体的全部报道")
+            print("           --nonlethal --search-cmd ...  未遂专项检索")
+            print("     交付时必须附「覆盖边界声明」说明这个缺口。")
+
+        # ---- 并联：信源表逐家遍历（补 UCDP 收不到的部分）----
+        parts = []
+        ucdp_out = os.path.join(od, "01a_ucdp.jsonl")
+        if os.path.isfile(ucdp_out):
+            parts.append(ucdp_out)
+        elif os.path.isfile(cand):
+            parts.append(cand)
+
+        if a.registry:
+            if not os.path.isfile(a.registry):
+                print("\n  ✗ 信源表不存在：%s" % a.registry)
+                return 1
+            reg_out = os.path.join(od, "01b_registry.jsonl")
+            rargs = [os.path.join(HERE, "harvest_source_registry.py"),
+                     "--registry", a.registry, "--month", a.month,
+                     "--out", reg_out,
+                     "--status-out", os.path.join(od, "01b_信源遍历状态.xlsx"),
+                     "--state", os.path.join(od, ".registry_state.json")]
+            if a.search_cmd:
+                rargs += ["--search-cmd", a.search_cmd]
+            if a.fetch_cmd:
+                rargs += ["--fetch-cmd", a.fetch_cmd]
+            if a.registry_limit:
+                rargs += ["--limit", str(a.registry_limit)]
+            ok, out = run_step("采集：信源表逐家遍历", rargs, expect=0, allow_fail=True)
+            results.append(("采集(信源遍历)", ok, out))
+            if ok and os.path.isfile(reg_out):
+                parts.append(reg_out)
+
+        # ---- 并联：未遂/非致命专项 ----
+        # 口径要求「预谋被破获、未遂、零伤亡的案子照常计入」，
+        # 而 UCDP 只收造成死亡的事件 —— 这一类只能靠定向检索补。
+        nonlethal_queries = []
+        if a.nonlethal:
+            if not a.search_cmd:
+                print("\n  ⚠️  --nonlethal 需要同时给 --search-cmd，已跳过")
+            else:
+                nonlethal_queries = [
+                    "%s foiled terrorist plot thwarted attack" % a.month,
+                    "%s terror plot busted arrested suspects bomb" % a.month,
+                    "%s 未遂 挫败 恐怖袭击 图谋" % a.month,
+                ]
+
+        if nonlethal_queries:
+            nl_out = os.path.join(od, "01c_nonlethal.jsonl")
+            nl_rows, nl_seen = [], set()
+            for q in nonlethal_queries:
+                cmd = a.search_cmd.replace("{q}", q)
+                try:
+                    pr = subprocess.run(cmd, shell=True, capture_output=True,
+                                        timeout=120, env=_clean_env())
+                    raw = (pr.stdout or b"").decode("utf-8", "replace")
+                except Exception as e:  # noqa: BLE001
+                    print("    专项检索失败：%s" % str(e)[:50])
+                    continue
+                if not raw.strip():
+                    continue
+                try:
+                    d = json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                for r0 in (d.get("results") or []):
+                    u = r0.get("url") or ""
+                    t = r0.get("title") or ""
+                    if not u or u in nl_seen:
+                        continue
+                    # 只要明确是「未遂/被挫败」的，正常发生的袭击这路不碰
+                    if not re.search(r"(?i)(foil|thwart|bust|plot|未遂|挫败|图谋|prevent)", t + " " + u):
+                        continue
+                    nl_seen.add(u)
+                    dt = str(r0.get("date") or "")[:10]
+                    if not dt:
+                        m2 = re.search(r"/(20\d{2})/(\d{1,2})/(\d{1,2})/", u)
+                        if m2:
+                            dt = "%s-%02d-%02d" % (m2.group(1), int(m2.group(2)), int(m2.group(3)))
+                    nl_rows.append({
+                        "source": "nonlethal", "date": dt, "country": "",
+                        "place": "", "summary": t, "deaths": None, "injured": None,
+                        "actor_a": "", "actor_b": "", "act_type": "",
+                        "url": u, "raw_id": hashlib.md5(u.encode()).hexdigest()[:12],
+                        "note": "未遂/被挫败专项通道",
+                    })
+            if nl_rows:
+                with open(nl_out, "w", encoding="utf-8") as f:
+                    for r0 in nl_rows:
+                        f.write(json.dumps(r0, ensure_ascii=False) + "\n")
+                parts.append(nl_out)
+            print("    未遂专项：%d 条" % len(nl_rows))
+
+        # ---- 合并多源 ----
+        contrib = []
+        if len(parts) > 1:
+            print("\n  合并多源候选：")
+            for pth in parts:
+                try:
+                    with open(pth, encoding="utf-8") as f:
+                        contrib.append((os.path.basename(pth),
+                                        sum(1 for ln in f if ln.strip())))
+                except Exception:  # noqa: BLE001
+                    pass
+            nm = merge_candidates(parts, cand)
+            print("    → 去重合并后 %d 条" % nm)
+        elif len(parts) == 1 and os.path.abspath(parts[0]) != os.path.abspath(cand):
+            try:
+                import shutil
+                shutil.copyfile(parts[0], cand)
+            except Exception:  # noqa: BLE001
+                pass
 
         # 采集后必须校验：0 条候选不许继续往下跑
         # 实测：候选集只有 2026-09，查 2025-08 会命中 0 条，
@@ -259,6 +522,43 @@ def main():
             if not ok:
                 print("\n  ⚠️  量级门禁未通过。不要直接交付 ——")
                 print("     先补数据源（换正式 GED / 接 ACLED / 逐国点名本地媒体）。")
+
+    # ============ 覆盖边界声明（每版必出，不许省）============
+    # 台账的数字看起来像「全球恐怖袭击总量」，其实只是「被这几个源收录到的那部分」。
+    # 不写清楚，读的人会拿它当普查数据用，而这个误用从表里完全看不出来。
+    if a.stage in ("gate", "all") and os.path.isfile(ledger):
+        zero_death = attempted = nled = 0
+        try:
+            import openpyxl
+            wb = openpyxl.load_workbook(ledger, data_only=True)
+            ws = wb.worksheets[0]
+            rows = list(ws.iter_rows(values_only=True))
+            hdr = [str(h or "").strip() for h in rows[0]]
+            i_d = hdr.index("死亡人数") if "死亡人数" in hdr else None
+            i_b = hdr.index("备注") if "备注" in hdr else None
+            for r in rows[1:]:
+                if not r or not r[0]:
+                    continue
+                nled += 1
+                if i_d is not None:
+                    v = str(r[i_d] or "").strip()
+                    if v in ("0", "0.0"):
+                        zero_death += 1
+                if i_b is not None:
+                    b = str(r[i_b] or "")
+                    if re.search(r"未遂|被挫败|图谋|未发生", b):
+                        attempted += 1
+        except Exception:  # noqa: BLE001
+            pass
+        cn = os.path.join(od, "覆盖边界声明.md")
+        write_coverage_note(cn, a.month, contrib,
+                            {"zero_death": zero_death, "attempted": attempted}, nled)
+        print("\n  覆盖边界声明 → %s" % cn)
+        if zero_death + attempted <= 2 and nled > 20:
+            print("")
+            print("  ⚠️  非致命 %d 条、未遂 %d 条 —— 几乎只覆盖了致命事件。" % (zero_death, attempted))
+            print("     口径要求「预谋被破获、未遂、零伤亡照常计入」，这一块明显不足。")
+            print("     补法：加 --registry 走逐家遍历，或加 --nonlethal --search-cmd 开专项通道。")
 
     # ============ 阶段 5：三份报告 + PPT ============
     if a.stage in ("gate", "all") and os.path.isfile(ledger):

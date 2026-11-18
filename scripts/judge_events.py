@@ -168,6 +168,16 @@ ATTACKER_SIGNAL = re.compile(
     r"assailants?|attackers?|perpetrators?|bombers?|suicide bomber|"
     r"suspected militants|armed men|unknown gunmen)")
 
+# 被挫败的恐怖图谋。口径规定「图谋」和「反恐执法行动」是分列的两类，
+# 前者进统计、后者不进。实测踩坑：不加这一条时，UCDP 一个非致命事件都不给，
+# 未遂专项辛苦检索来的 22 条全被判成 N5 反恐执法、计入 0 条（2025-08 实测）。
+FOILED_PLOT = re.compile(
+    r"(?i)((?:foil|thwart|bust|prevent|disrupt)\w*\s+(?:a\s+|an\s+)?"
+    r"(?:major\s+|deadly\s+|another\s+)?"
+    r"(?:terror(?:ist)?|bomb|suicide|attack|plot|conspiracy|plan)|"
+    r"(?:plot|plan|conspiracy)\s+(?:was\s+|has\s+been\s+)?(?:foiled|thwarted|busted|disrupted)|"
+    r"挫败.{0,12}(?:图谋|恐袭|袭击|爆炸|阴谋)|破获.{0,12}(?:图谋|恐怖)|粉碎.{0,12}(?:图谋|阴谋))")
+
 # 「恐怖分子被击毙」是反恐战果，不是恐袭
 TERROR_KILLED = re.compile(
     r"(?i)(?:terrorists?|militants?|insurgents?|gunmen|extremists?)\s+"
@@ -365,6 +375,17 @@ def judge(rec, min_deaths=1):
     # UCDP 的 side_a 是「冲突一方」，多数时候是政府方。台账的「袭击者」列
     # 直接抄了它，于是 actor_a 写成「Government of Iraq」—— 政府其实是受害者。
     # 拿它当施害者会把整条判定链判反。这一段只从摘要的主宾关系判断谁打谁。
+    # ---- 被挫败的恐怖图谋 = 口径里的「图谋」类，计入并标未遂 ----
+    # 顺序放在军事/执法判断之前：否则「安全部队挫败袭击图谋」会被 LAW_ENFORCE 判成
+    # 执法行动、计入 0 条。同时出现的「击毙/抓获」是战果，不改变图谋本身成立。
+    if FOILED_PLOT.search(txt):
+        if GOV_AGGRESSIVE.search(txt):
+            return "保留", "X1", ("图谋被挫败且伴随反恐战果，性质=未遂恐袭+反恐成果，"
+                                  "保留作对照、不计入统计")
+        if deaths == 0:
+            return "计入", "P6", "恐怖图谋被挫败（未遂、零死亡），按口径计入并标未遂"
+        return "计入", "P6", "恐怖图谋被挫败（未遂），按口径计入并标未遂"
+
     # 汇总结算条目必须最先拦：「Timeline (Terrorist Activities)」这类月度汇总
     # 里含 terrorists/killed 字样，晚于施害者信号检查就会被当成一起事件。
     if SRC_AGGREGATE.search(txt):
