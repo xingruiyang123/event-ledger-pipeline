@@ -204,12 +204,19 @@ def main():
     ap.add_argument("--fetch-cmd", default="",
                     help='抓取命令模板，{url} 为占位。例：'
                          '\'D:/DSH/sx.cmd fetch "{url}"\'')
-    ap.add_argument("--timeout", type=int, default=60)
+    ap.add_argument("--timeout", type=int, default=20,
+                    help="单次抓取超时秒。默认 20 —— 实测抓不到的站点 60 秒也抓不到，"
+                         "只是白等。43% 的 URL 抓不到，用 60 秒会让平均耗时变成 40 秒/条"
+                         "（589 条要 6.5 小时）；降到 20 后约 11 秒/条")
     ap.add_argument("--sleep", type=float, default=0.3)
     ap.add_argument("--limit", type=int, default=0, help="只核前 N 条（0=全部）")
     ap.add_argument("--only", default="",
                     help="只输出这些判定（逗号分隔 pass,partial,fail,fetchfail）")
     ap.add_argument("--budget-seconds", type=int, default=0)
+    ap.add_argument("--resume", action="store_true",
+                    help="断点续跑：跳过 <out>.progress.json 里已核过的 URL。"
+                         "实测抓正文约 40 秒/条（含反爬重试），589 条要 6 小时，"
+                         "不分批跑永远跑不完")
     a = ap.parse_args()
 
     if not a.fetch_cmd:
@@ -232,6 +239,66 @@ def main():
     print("待核验 %d 条（有 http 链接的）" % len(todo))
     print()
 
+    _prog = a.out + ".progress.json"
+    _done = set()
+    if a.resume and os.path.isfile(_prog):
+        try:
+            _raw = json.load(io.open(_prog, encoding="utf-8"))
+            if isinstance(_raw, dict):
+                _done = set(_raw.keys())
+                _saved = _raw
+            else:
+                _done = set(_raw)
+                _saved = {}
+            print("  断点续跑：已核 %d 条（其中 %d 条带结论）"
+                  % (len(_done), len(_saved)))
+            # 把已保存的结论直接写回记录，不必重跑
+            if _saved:
+                _n_fill = 0
+                for _r in rows:
+                    _u = str(_r.get("信息来源URL") or _r.get("url") or "")
+                    if _u in _saved and not _r.get("verify_result"):
+                        _r["verify_result"] = _saved[_u][0]
+                        _r["verify_note"] = _saved[_u][1]
+                        _n_fill += 1
+                if _n_fill:
+                    print("  从进度恢复结论 %d 条" % _n_fill)
+        except Exception:  # noqa: BLE001
+            _done = set()
+            _saved = {}
+    if _done:
+        _b = len(todo)
+        todo = [r for r in todo
+                if str(r.get("信息来源URL") or r.get("url") or "") not in _done]
+        print("  跳过已核 %d 条，剩 %d 条" % (_b - len(todo), len(todo)))
+        if not todo:
+            print("  全部核完，无需再跑。")
+            return 0
+
+    def _save_prog():
+        """每 10 条落一次盘，同时保住「结论」。
+
+        早前版本只记 URL，中断后重跑时那些 URL 被跳过、结论却丢了
+        —— 实测 kill 时 110 条里只有 60 条的结论进了 out 文件。
+        现在存 {url: [result, note]}，中断不掉结论。
+        """
+        try:
+            _acc = {}
+            if os.path.isfile(_prog):
+                try:
+                    _acc = json.load(io.open(_prog, encoding="utf-8"))
+                except Exception:  # noqa: BLE001
+                    _acc = {}
+            for _r in todo:
+                _u = str(_r.get("信息来源URL") or _r.get("url") or "")
+                if _u and _r.get("verify_result"):
+                    _acc[_u] = [_r["verify_result"], _r.get("verify_note") or ""]
+            with io.open(_prog, "w", encoding="utf-8") as _f:
+                json.dump(_acc, _f, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    _new = []
     t0 = time.time()
     stat = {"pass": 0, "partial": 0, "fail": 0, "fetchfail": 0}
     for n, r in enumerate(todo, 1):
@@ -240,11 +307,15 @@ def main():
             break
         url = str(r.get("信息来源URL") or r.get("url") or "")
         body = fetch(a.fetch_cmd, url, a.timeout)
+        _new.append(url)
+        if len(_new) % 10 == 0:
+            _save_prog()
+
         if len(body) < 200:
             r["verify_result"] = "抓不到"
             r["verify_note"] = "正文 %d 字符，太少" % len(body)
             stat["fetchfail"] += 1
-            print("  [%d/%d] ✗抓不到 %s" % (n, len(todo), url[:60]))
+            print("  [%d/%d] ✗抓不到 %s" % (n, len(todo), url[:60]), flush=True)
             time.sleep(a.sleep)
             continue
 
@@ -274,6 +345,8 @@ def main():
         print("  [%d/%d] %s %s | %s" % (n, len(todo), mark, res, r["verify_note"][:70]))
         time.sleep(a.sleep)
 
+    _save_prog()
+
     print()
     print("=== 核验结果 ===")
     tot = sum(stat.values())
@@ -291,6 +364,27 @@ def main():
         out_rows = [r for r in rows if r.get("verify_result") in keep]
         print()
         print("按 --only 过滤后 %d 条" % len(out_rows))
+
+    # 分批跑时，本批只核了一部分；要把之前批次的核验结果合并回来，
+    # 否则每批的输出都会覆盖掉上一批，最后只剩最后一批。
+    if a.resume and os.path.isfile(a.out):
+        try:
+            _prev = json.load(io.open(a.out, encoding="utf-8"))
+            _pm = {}
+            for x in _prev:
+                _u = str(x.get("信息来源URL") or x.get("url") or "")
+                if _u and x.get("verify_result"):
+                    _pm[_u] = (x["verify_result"], x.get("verify_note") or "")
+            n_merge = 0
+            for r in out_rows:
+                _u = str(r.get("信息来源URL") or r.get("url") or "")
+                if _u in _pm and not r.get("verify_result"):
+                    r["verify_result"], r["verify_note"] = _pm[_u]
+                    n_merge += 1
+            if n_merge:
+                print("  合并前几批结果 %d 条" % n_merge)
+        except Exception:  # noqa: BLE001
+            pass
 
     d = os.path.dirname(os.path.abspath(a.out))
     if d and not os.path.isdir(d):
