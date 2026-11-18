@@ -699,14 +699,18 @@ def main():
         # 保守去重：国家+日期+死亡数+地点 都相同才算同一事件。
         # 只按 国+日+死 会把「同一天同国两起都死1人」误合并（实测去掉 872 条，过激）。
         _cty, _pl = r.get("country"), r.get("place")
-        if not _cty and not _pl:
-            # 国家与地点都没填时（逐家遍历来的新闻候选就是这样），
-            # 三字段做 key 会把「同一天、同死亡数」的所有事件并成一条
-            # （实测 148 条被并成 53 条）。改用摘要前缀区分。
-            _summ = re.sub(r"\W+", "", (r.get("summary") or ""))[:30].lower()
-            key = ("__nosrc__", r.get("date"), r.get("deaths"), _summ)
-        else:
+        _summ = re.sub(r"\W+", "", (r.get("summary") or ""))[:30].lower()
+        # 只有「国家 + 日期 + 死亡数 + 地点」四者齐全时才敢用这四元组去重。
+        # 缺任何一个都会误合并：
+        #   · 国家地点都缺（逐家遍历候选）→ 实测 148 条被并成 53 条
+        #   · 有国家缺地点（矩阵遍历候选）→ 实测 1092 条被并成 338 条，
+        #     20 起已知靶子只命中 1 起，看起来像「遍历没用」，其实是去重吃掉了
+        # 所以两种情形都退到「摘要前缀」兜底。
+        if _cty and _pl:
             key = (_cty, r.get("date"), r.get("deaths"), _pl)
+        else:
+            key = ("__src__", _cty, _pl, r.get("date"),
+                   r.get("deaths"), _summ)
         if key in seen:
             continue
         seen.add(key)
