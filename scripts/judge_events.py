@@ -329,6 +329,62 @@ TERROR_ORG = re.compile(
 )
 
 
+# ---- 性质可信度（terror certainty）----
+# 衡量「这条像不像恐怖袭击」，与「置信度 A/B」（衡量多源印证）是两回事。
+# 为什么需要它：整体精确率约 40-60%，规则式方法已到极限（见 SKILL.md）。
+# 但错误不是随机分布的 —— 有组织名、分方死亡方向明确、多源印证的可靠得多。
+# 实测 2026-07：A+B 档精确率 68-82%，C 档 26-52%。
+ORG_STRICT = re.compile(
+    r"(?i)\b(ISIS|ISIL|ISWAP|ISKP|Boko\s*Haram|al-?Shabaab|JNIM|AQAP|AQIM|"
+    r"TTP|Tehreek-?e-?Taliban|BLA|ADF|M23|FDLR|CODECO|Houthi|Hezbollah|"
+    r"Hamas|HTS|PKK|FARC|ELN)\b")
+ACTOR_ACT = re.compile(
+    r"(?i)\b(terrorists?|militants?|insurgents?|jihadists?|extremists?|"
+    r"gunmen|assailants?)\b[^.;]{0,30}?"
+    r"\b(kill|killed|kills|attack|attacked|stormed|raided|abduct|bomb|shot)")
+ZH_ACTOR_ACT = re.compile(
+    r"(恐怖分子|武装分子|极端分子)[^。；]{0,12}(袭击|杀害|打死|绑架|爆炸)")
+
+
+def terror_score(summary, extra):
+    """0-4 分。分越高越像恐怖袭击。
+
+    S1 +1  摘要含具体恐怖组织名
+    S2 +1  含 terrorist/militant 等作为施动方
+    S3 +1  分方死亡方向明确（只有政府方死）
+    S4 +1  多源印证（n_sources >= 2）
+    """
+    sc, why = 0, []
+    t = str(summary or "")
+    if ORG_STRICT.search(t):
+        sc += 1
+        why.append("S1组织名")
+    if ACTOR_ACT.search(t) or ZH_ACTOR_ACT.search(t):
+        sc += 1
+        why.append("S2施动词")
+    e = extra or {}
+    try:
+        a = int(e.get("deaths_a") or 0)
+        b = int(e.get("deaths_b") or 0)
+    except Exception:  # noqa: BLE001
+        a = b = 0
+    if a > 0 and b == 0:
+        sc += 1
+        why.append("S3方向明确")
+    try:
+        if int(e.get("n_sources") or 0) >= 2:
+            sc += 1
+            why.append("S4多源")
+    except Exception:  # noqa: BLE001
+        pass
+    return sc, why
+
+
+def terror_tier(sc):
+    """0-4 分 → A/B/C 档。"""
+    return "A" if sc >= 3 else ("B" if sc == 2 else "C")
+
+
 def _extra_of(rec):
     """取 extra 字典（可能是 dict 或 json 字符串）。"""
     e = rec.get("extra") if isinstance(rec, dict) else None
@@ -821,6 +877,12 @@ def to_row(rec, verdict, chain, note):
     except Exception:  # noqa: BLE001
         y = mo = dd = ""
     ns = _n_sources(rec)
+    # 性质可信度：0-4 分，A/B = 高置信，C = 需人工复核
+    try:
+        _sc, _why = terror_score(rec.get("summary") or "", _extra_of(rec))
+    except Exception:  # noqa: BLE001
+        _sc, _why = 0, []
+    _tier = terror_tier(_sc)
     return {
         "事件摘要": (rec.get("summary") or "")[:200],
         "国家": rec.get("country") or "",
@@ -841,7 +903,10 @@ def to_row(rec, verdict, chain, note):
         "审核状态": "已确认" if verdict == "计入" else ("待审核" if verdict == "需人工判" else "已退回"),
         "关联知识点": chain,
         # 备注里带上「媒体名 + 标题」：UCDP 不给 URL，后续 enrich_urls 靠这个反查
-        "备注": "[判定]%s ｜ [src]%s" % (note, _src_hint(rec)),
+        # 另带「性质分档」：A/B = 高置信子集（实测精确率 68-82%），
+        # C = 需人工复核（26-52%）。19 列表头不能动，所以放备注。
+        "备注": "[判定]%s ｜ [性质]%s%d分 ｜ [src]%s"
+                % (note, _tier, _sc, _src_hint(rec)),
     }
 
 

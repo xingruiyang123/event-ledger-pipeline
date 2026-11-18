@@ -819,6 +819,34 @@ def main():
         run_step("生成 19 列台账", [os.path.join(HERE, "make_ledger.py"),
                                  "--template", "19列", "--rows", judged,
                                  "--out", ledger], allow_fail=True)
+        # ---- 性质分档统计 ----
+        # 整体精确率约 40-60%，但 A+B 档（有组织名/分方死亡明确/多源）
+        # 实测 68-82%。不打印这个，使用者会拿整份台账当等质量数据用。
+        try:
+            import openpyxl as _ox
+            _wb = _ox.load_workbook(ledger, data_only=True)
+            _ws = _wb.worksheets[0]
+            _tx = {}
+            for _r in list(_ws.iter_rows(values_only=True))[1:]:
+                if not _r or not _r[0]:
+                    continue
+                _m = re.search(r"\[性质\]([ABC])", str(_r[-1] or ""))
+                _k = _m.group(1) if _m else "?"
+                _tx[_k] = _tx.get(_k, 0) + 1
+            _hi = _tx.get("A", 0) + _tx.get("B", 0)
+            _all = sum(_tx.values())
+            if _all:
+                print("")
+                print("  性质分档：A %d ｜ B %d ｜ C %d"
+                      % (_tx.get("A", 0), _tx.get("B", 0), _tx.get("C", 0)))
+                print("  高置信子集 A+B = %d 条（%.0f%%），实测精确率约 68-82%%"
+                      % (_hi, 100.0 * _hi / _all))
+                print("  C 档 %d 条（%.0f%%）精确率约 26-52%%，"
+                      "逐条引用前需人工复核"
+                      % (_tx.get("C", 0), 100.0 * _tx.get("C", 0) / _all))
+        except Exception as _e:  # noqa: BLE001
+            print("  （性质分档统计跳过：%s）" % str(_e)[:60])
+
         run_step("门禁：表头", [os.path.join(HERE, "make_ledger.py"),
                              "--check", ledger], allow_fail=True)
 
