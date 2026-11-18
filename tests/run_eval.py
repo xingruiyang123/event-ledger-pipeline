@@ -84,7 +84,8 @@ def as_binary(verdict):
 def main():
     ap = argparse.ArgumentParser(description="判定链真值评测")
     ap.add_argument("--golden", default=os.path.join(HERE, "fixtures", "golden_2026-07.jsonl"))
-    ap.add_argument("--min-deaths", type=int, default=1)
+    ap.add_argument("--min-deaths", type=int, default=0,
+                    help="与 judge_events.py 默认值保持一致（0=不按死亡数设门槛）")
     ap.add_argument("--show-errors", type=int, default=0, help="打印前 N 条错判")
     ap.add_argument("--baseline", type=float, default=0.0,
                     help="准确率低于此值则 exit 2（用于回归门禁）")

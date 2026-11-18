@@ -214,6 +214,22 @@ def write_coverage_note(path, month, contributions, judged, ledger_rows):
     lines.append("- 判定后进台账：**%d** 条" % ledger_rows)
     lines.append("- 非致命（死亡=0）事件：**%d** 条" % (judged.get("zero_death", 0)))
     lines.append("- 未遂/被挫败事件：**%d** 条" % (judged.get("attempted", 0)))
+    dist = judged.get("country_dist") or []
+    if dist:
+        tot = sum(n for _, n in dist) or 1
+        lines.append("")
+        lines.append("### 国家分布（前 12，用来识别覆盖偏斜）")
+        lines.append("")
+        lines.append("| 国家 | 条数 | 占比 |")
+        lines.append("|---|---|---|")
+        for c0, n0 in dist[:12]:
+            lines.append("| %s | %d | %.1f%% |" % (c0 or "未标", n0, 100.0 * n0 / tot))
+        top2 = sum(n for _, n in dist[:2])
+        if tot >= 20 and top2 / tot > 0.5:
+            lines.append("")
+            lines.append("> 前两个国家占 **%.0f%%**，分布高度集中。" % (100.0 * top2 / tot))
+            lines.append("> 这类分布通常反映数据源的地域偏向（ACLED 在俄乌、中东极密集），")
+            lines.append("> **不能当全球恐袭分布用**。")
     lines.append("")
     lines.append("> 若「非致命」与「未遂」两条接近 0，说明这一版**几乎只覆盖了致命事件**，")
     lines.append("> 与口径要求的「未遂照常计入」有明显差距。补法是加 --registry 走逐家遍历，")
@@ -246,6 +262,11 @@ def main():
                     help="信源表 xlsx。给了就并行走「逐家遍历」，补 UCDP 收不到的非致命/未遂事件")
     ap.add_argument("--registry-limit", type=int, default=0,
                     help="逐家遍历只跑前 N 家（0=全部）。先小样本试时用")
+    ap.add_argument("--enrich-limit", type=int, default=300,
+                    help="补「信息来源URL」最多处理多少条（默认 300，按死亡数降序优先）。"
+                         "0=不限 —— 但每条含 1 秒限速，全量会跑几小时")
+    ap.add_argument("--enrich-budget", type=int, default=900,
+                    help="补链的总时间预算秒数（默认 900 秒 = 15 分钟），到点就停")
     ap.add_argument("--acled", default=None,
                     help="ACLED 采集产物（jsonl，由 harvest_acled.py 生成）。"
                          "补 UCDP 收不到的非致命与未遂事件")
@@ -515,7 +536,9 @@ def main():
 
         run_step("判定（判定链）", [os.path.join(HERE, "judge_events.py"),
                                  "--in", cand, "--out", judged,
-                                 "--out-manual", os.path.join(od, "02_需人工判.json")],
+                                 "--out-manual", os.path.join(od, "02_需人工判.json"),
+                                 # 显式给 0：口径要求未遂与零伤亡照常计入
+                                 "--min-deaths", "0"],
                  allow_fail=True)
         print("")
         print("  ℹ️  「需人工判」不是「待定」，是明确的动作：逐条看原文判完写回。")
@@ -524,9 +547,15 @@ def main():
         # 可选：补「信息来源URL」（UCDP 不给链接，需靠媒体名+标题反查）
         if a.search_cmd:
             judged_url = os.path.join(od, "02_判定_带链接.json")
-            run_step("补信息来源URL", [os.path.join(HERE, "enrich_urls.py"),
-                                     "--in", judged, "--out", judged_url,
-                                     "--search-cmd", a.search_cmd], allow_fail=True)
+            eargs = [os.path.join(HERE, "enrich_urls.py"),
+                     "--in", judged, "--out", judged_url,
+                     "--search-cmd", a.search_cmd,
+                     "--budget-seconds", str(a.enrich_budget)]
+            if a.enrich_limit:
+                eargs += ["--limit", str(a.enrich_limit)]
+            run_step("补信息来源URL（限 %d 条 / %d 秒）"
+                     % (a.enrich_limit or 99999, a.enrich_budget),
+                     eargs, allow_fail=True)
             if os.path.isfile(judged_url):
                 judged = judged_url
 
@@ -574,8 +603,11 @@ def main():
                     continue
                 nled += 1
                 if i_d is not None:
-                    v = str(r[i_d] or "").strip()
-                    if v in ("0", "0.0"):
+                    # 注意 r[i_d] 取到 int 0 时是假值，直接 or "" 会变成空串，
+                    # 于是「死亡=0」全被统计成「死亡为空」，声明里永远报 0 条。
+                    # 实测踩过：台账里明明 773 行零死亡，声明却说「非致命 0 条」。
+                    _raw = r[i_d]
+                    if _raw is not None and str(_raw).strip() in ("0", "0.0"):
                         zero_death += 1
                 if i_b is not None:
                     b = str(r[i_b] or "")
@@ -583,9 +615,26 @@ def main():
                         attempted += 1
         except Exception:  # noqa: BLE001
             pass
+        # 国家分布：用来暴露数据源的地域偏向，避免把「俄乌密集」读成「全球恐袭上升」
+        country_dist = []
+        try:
+            import openpyxl as _ox
+            _wb = _ox.load_workbook(ledger, data_only=True)
+            _ws = _wb.worksheets[0]
+            _rows = list(_ws.iter_rows(values_only=True))
+            _hdr = [str(h or "").strip() for h in _rows[0]]
+            _ic = _hdr.index("国家") if "国家" in _hdr else None
+            if _ic is not None:
+                from collections import Counter as _C
+                _c = _C(str(r[_ic] or "").strip() for r in _rows[1:] if r and r[0])
+                country_dist = _c.most_common()
+        except Exception:  # noqa: BLE001
+            pass
+
         cn = os.path.join(od, "覆盖边界声明.md")
         write_coverage_note(cn, a.month, contrib,
-                            {"zero_death": zero_death, "attempted": attempted}, nled)
+                            {"zero_death": zero_death, "attempted": attempted,
+                             "country_dist": country_dist}, nled)
         print("\n  覆盖边界声明 → %s" % cn)
         if zero_death + attempted <= 2 and nled > 20:
             print("")

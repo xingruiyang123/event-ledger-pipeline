@@ -280,7 +280,32 @@ def extract_one(rec):
     # UCDP 候选只有 summary 没有 text，两个都要认，否则整池抽取为空
     text = rec.get("text") or rec.get("summary") or ""
     cty = canon_country(text, rec.get("country_guess") or "")
-    deaths, injured, basis = extract_numbers(text)
+    deaths_txt, injured_txt, basis = extract_numbers(text)
+
+    # 结构化字段优先，不能被文本重抽覆盖。
+    # 踩过的坑：ACLED 给的 fatalities 是准确的整数（0 也是有效值），
+    # 但它的 notes 是「On 8 August 2025, government security forces...」这种长叙述，
+    # 抽不出数字 -> 返回 None -> 把「明确的 0」覆盖成「未知」。
+    # 结果是 11043 条零死亡事件在台账里一条都没留下（2025-08 实测）。
+    _d0 = rec.get("deaths")
+    if isinstance(_d0, bool):
+        _d0 = None
+    if isinstance(_d0, int):
+        deaths = _d0
+        if basis:
+            basis = "结构化字段优先(=死亡%d)；文本另抽：%s" % (_d0, basis)
+    elif isinstance(_d0, str) and _d0.strip().lstrip("-").isdigit():
+        deaths = int(_d0.strip())
+    else:
+        deaths = deaths_txt
+
+    _i0 = rec.get("injured")
+    if isinstance(_i0, int) and not isinstance(_i0, bool):
+        injured = _i0
+    elif isinstance(_i0, str) and _i0.strip().lstrip("-").isdigit():
+        injured = int(_i0.strip())
+    else:
+        injured = injured_txt
     act = pick_act(text)
     victims = pick_victims(text)
     side, subj = judge_side(text)

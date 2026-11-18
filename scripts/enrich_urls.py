@@ -281,7 +281,10 @@ def read_rows(path):
         data = json.load(io.open(path, encoding="utf-8"))
         if isinstance(data, dict):
             data = [data]
-        return data, "jsonl"          # 写出时同样逐行，两种格式通用
+        return data, "json"   # 读 .json 就按 .json 回写（JSON 数组）。
+                              # 早前这里返回 "jsonl"，导致 --out xxx.json 写出的是逐行 JSON，
+                              # 下游 make_ledger 用 json.load 读它会报 Extra data。
+                              # 这类「格式与扩展名不符」是最难查的一类数据流断裂。
     if path.lower().endswith(".jsonl"):
         rows = []
         with io.open(path, encoding="utf-8") as f:
@@ -394,6 +397,13 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="单次搜索超时秒")
     ap.add_argument("--sleep", type=float, default=1.0, help="每条之间的间隔秒数（防限流）")
     ap.add_argument("--dry-run", action="store_true", help="只打印查询，不实际搜索")
+    ap.add_argument("--budget-seconds", type=int, default=0,
+                    help="总时间预算，到点就停并写回已补到的（0=不限）。"
+                         "实测每条含 1 秒限速，2000 条要 33 分钟，全量要 4 小时 —— "
+                         "跑大批量时必须给预算")
+    ap.add_argument("--priority", default="deaths",
+                    choices=["deaths", "none"],
+                    help="处理顺序。deaths=按死亡数降序（重要事件先补到链接），none=按原序")
     ap.add_argument("--fill", default="", help="xlsx 模式下用哪个值填（默认 信息来源URL）")
     a = ap.parse_args()
 
@@ -412,6 +422,20 @@ def main():
         return False
 
     todo = [i for i, r in enumerate(rows) if not has_url(r)]
+    # 按死亡数降序：链接有限时先给重要事件补上。
+    # 实测：不排序时前 200 条可能是随机顺序，大事件反而排在最后补不到。
+    if a.priority == "deaths":
+        def _deaths(idx):
+            r0 = rows[idx]
+            for k in ("deaths", "死亡人数", "fatalities"):
+                v = r0.get(k)
+                if v is not None and str(v).strip() not in ("", "—", "None"):
+                    try:
+                        return int(float(str(v).replace(",", "")))
+                    except Exception:  # noqa: BLE001
+                        pass
+            return 0
+        todo.sort(key=_deaths, reverse=True)
     if a.limit:
         todo = todo[:a.limit]
     print("已有 URL：%d 条 ｜ 待补：%d 条" % (len(rows) - sum(1 for i in range(len(rows)) if not has_url(rows[i])), len(todo)))
@@ -436,7 +460,55 @@ def main():
     failed = []
     t0 = time.time()
     for n, i in enumerate(todo, 1):
+        # 预算到点就停，把已补到的写回（剩下的一轮再继续）
+        if a.budget_seconds and (time.time() - t0) > a.budget_seconds:
+            print("  ⏱  预算 %d 秒到点，停止。已处理 %d 条，剩 %d 条留待下一轮"
+                  % (a.budget_seconds, n - 1, len(todo) - n + 1))
+            break
+
         r = rows[i]
+
+        # ACLED 自带 source（媒体名）与 event_id_cnty，官网可据 event_id 查回原条目。
+        # 再花一次检索去反查 URL 是浪费：4 小时里有一半会耗在这上面。
+        # 采集端已给来源线索的（备注里有 [src]媒体名/标题），直接采信、不检索。
+        # 实测 2025-08 全量判定结果 2236 条，[src] 覆盖率 100%、URL 覆盖率 0%。
+        # 也就是说这一批条目本来就没有 URL 可查，联网检索纯属空转：
+        # 每条 1 秒限速 × 2236 条 = 37 分钟，换回来 0 个链接。
+        _note = str(r.get("备注") or r.get("备注") or "")
+        _m_src = re.search(r"\[src\]\s*(.+)$", _note)
+        if _m_src and not str(r.get("信息来源URL") or r.get("url") or "").startswith("http"):
+            _hint = _m_src.group(1).strip()[:160]
+            _txt = "[媒体名来源] " + _hint
+            if str(a.out or "").lower().endswith((".xlsx", ".xlsm")):
+                r[a.fill or "信息来源URL"] = _txt
+            else:
+                r["source_note"] = _txt
+                r[a.fill or "信息来源URL"] = _txt
+            filled += 1
+            if n % 200 == 0 or n == len(todo):
+                print("  [%d/%d] ✓(采集端来源免检) 已补 %d" % (n, len(todo), filled), flush=True)
+            continue
+
+        # ACLED 条目识别：不能靠 extra（judge 转 19 列时已丢），也不能靠 source
+        # （同样丢了）。用 event_id 的固定格式：三字母国家码 + 7 位数字，如 MEX100025。
+        # 这类条目带着 event_id，官网可据它查回原条目，不必再花一次检索去反查 URL。
+        acl_src = (r.get("extra") or {}).get("acled_source") or ""
+        _rid = str(r.get("raw_id") or r.get("GED 编号") or r.get("GED编号") or "").strip()
+        _is_acled = bool(re.match(r"^[A-Z]{3}\d{6,8}$", _rid))
+        if _is_acled and not acl_src:
+            acl_src = "ACLED event_id=" + _rid
+        if acl_src and (str(r.get("source") or "") == "acled" or _is_acled):
+            note_txt = "[ACLED] " + str(acl_src)[:120]
+            if str(a.out or "").lower().endswith((".xlsx", ".xlsm")):
+                r[a.fill or "信息来源URL"] = note_txt
+            else:
+                r["source_note"] = note_txt
+                r[a.fill or "信息来源URL"] = note_txt
+            filled += 1
+            if n % 5 == 0 or n == len(todo):
+                print("  [%d/%d] ✓(ACLED免检) 已补 %d" % (n, len(todo), filled), flush=True)
+            continue
+
         q = build_query(r)
         raw = run_search(a.search_cmd, q, a.timeout)
         res = extract_results(raw)
@@ -446,9 +518,10 @@ def main():
         if url:
             USED_URLS.add(url)
         if url:
-            if kind == "jsonl":
-                r["url"] = url
+            if str(a.out or "").lower().endswith((".xlsx", ".xlsm")):
+                r[a.fill or "信息来源URL"] = url
             else:
+                r["url"] = url
                 r[a.fill or "信息来源URL"] = url
             filled += 1
             mark = "✓"
@@ -467,7 +540,13 @@ def main():
 
     # 导出
     if a.out:
-        if kind == "jsonl":
+        # 输出格式由输出文件的扩展名决定，不由输入决定 ——
+        # 输入是 .json、输出是 .jsonl（或反之）都可能，跟着输入走必然出错。
+        out_kind = "jsonl" if str(a.out).lower().endswith(".jsonl") else "json"
+        if out_kind == "json":
+            with io.open(a.out, "w", encoding="utf-8") as f:
+                json.dump(rows, f, ensure_ascii=False, indent=1)
+        elif out_kind == "jsonl":
             with io.open(a.out, "w", encoding="utf-8") as f:
                 for r in rows:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
