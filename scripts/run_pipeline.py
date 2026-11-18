@@ -646,6 +646,22 @@ def main():
             print("判定结果需是 json 数组，每项含 19 列字段（见 make_ledger.py 的模板）。")
             print("你可以：① 手工判定后写成该文件；② 用你自己的判定脚本产出它。")
             return 1
+        # 口径标注：让每行自带「这个死亡数来自哪个源、该源口径如何」。
+        # 不动 19 列表头（硬性要求），写进备注列末尾。
+        if os.path.isfile(judged):
+            _tagged = os.path.join(od, "02_判定_带口径.json")
+            _targs = [os.path.join(HERE, "tag_caliber.py"),
+                      "--in", judged, "--out", _tagged]
+            _uc2 = [x for x in parts if "01a_ucdp" in x]
+            _ac2 = [x for x in parts if "acled" in x.lower()]
+            if _uc2:
+                _targs += ["--ucdp", _uc2[0]]
+            if _ac2:
+                _targs += ["--acled", _ac2[0]]
+            run_step("死亡数口径标注", _targs, expect=0, allow_fail=True)
+            if os.path.isfile(_tagged):
+                judged = _tagged
+
         run_step("生成 19 列台账", [os.path.join(HERE, "make_ledger.py"),
                                  "--template", "19列", "--rows", judged,
                                  "--out", ledger], allow_fail=True)
