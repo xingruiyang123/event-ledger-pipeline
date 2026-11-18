@@ -104,6 +104,104 @@ POLITICAL_ARMED = re.compile(
     r"(?i)(\bELN\b|\bFARC\b|\bEPL\b|dissiden|guerrilla|民族解放军|"
     r"Autodefensas Unidas|\bAUC\b|Sendero Luminoso|光辉道路)")
 
+
+# ---- 中文行为体识别 ----
+# 为什么必须单列一套：英文正则里的 \b 在中文文本里失效 ——
+# 中文字符也算 \w，「疑似IS关联」中的 IS 前后没有词边界，\bIS\b 匹配不到。
+# 2026-07 真值集实测：只有英文正则时 110 条有明确袭击者的样本，
+# 漏报率 97.3%（85 条落「需人工判」）；补上中文正则后见下方测试。
+TERROR_ZH = re.compile(
+    r"(伊斯兰国|ISIS|ISIL|ISKP|ISSP|ISWAP|ISGS|IS-?K省|IS-?S |"
+    # 裸 IS 两字母单独加会误中英文短词，必须绑上下文
+    r"疑似\s*IS|IS\s*(?:关联|细胞|成员|武装|分支|本体|宣称|组织|的)|（IS）|\bIS\b(?=\s*关联)|"
+    r"基地组织|青年党|博科圣地|塔利班|努斯拉|虔诚军|东伊运|东突|"
+    r"圣战|恐怖分子|恐怖组织|武装分子|武装人员|武装突击|武装袭击|"
+    r"叛乱分子|反政府武装|分离主义|极端组织|极端分子|"
+    r"真主党|哈马斯|圣城旅|圣战者|"
+    r"JNIM|JNIM-?FLA|AQIM|Ansar|保卫伊斯兰|"
+    r"民族解放军|光辉道路|伏击人员|枪手|袭击者|突击人员)")
+
+STATE_ZH = re.compile(
+    r"(政府军|政府部队|军方|军队|安全部队|警察|警方|公安|武警|"
+    r"国防部|内政部|国民警卫队|边防|宪兵|维和|军政府|"
+    r"当局|安全部门|反恐部门|安全机关|情报部门|NISA|BCIJ|"
+    r"部队|官兵|士兵|军人|巡逻队|哨所)")
+
+CRIMINAL_ZH = re.compile(
+    r"(贩毒|毒枭|卡特尔|黑帮|帮派|犯罪集团|走私|匪徒|土匪|劫匪|"
+    r"偷牛|偷牛贼|绑匪|人贩)")
+
+# ---- 主宾判断：谁打谁 ----
+# 为什么必须有这一组：UCDP 的 side_a 是「冲突一方」，通常是政府方，
+# 而台账的「袭击者」列直接照抄了它，于是 110 条样本里有 60 多条
+# actor_a 写成「Government of Iraq」这类 —— 政府方其实是受害者。
+# 拿它当施害者会让整条判定链判反。只能从摘要的主宾关系重新判断。
+MILITARY_OP = re.compile(
+    r"(?i)(retak(?:e|es|ing)|recaptur|counter-?offensive|offensive to |"
+    r"operation to (?:retake|liberate|clear)|liberat(?:e|ed|ion)|clearance operation|"
+    r"mopping-?up|sweep operation|"
+    r"清剿|围剿|搜剿|收复|夺回|解放|反攻|军事行动|作战行动|空袭毙|击毙.{0,6}名武装分子)")
+
+LAW_ENFORCE = re.compile(
+    r"(?i)(arrest(?:ed|s)?|detain(?:ed|s)?|apprehend(?:ed)?|captur(?:ed|es) a suspect|"
+    r"foil(?:ed|s)?|thwart(?:ed|s)?|bust(?:ed)?|dismantl(?:ed|es)|"
+    r"seized (?:a )?(?:cache|weapons|explosives)|crackdown|"
+    r"逮捕|抓捕|抓获|拘捕|拘留|查获|缴获|挫败|破获|打掉|捣毁|抓获|抓获归案)")
+
+GOV_VICTIM = re.compile(
+    r"(?i)((?:policemen|police officers?|police|cops?|soldiers?|troops?|officers?|"
+    r"security (?:forces?|personnel|officers?)|army personnel|military personnel|"
+    r"checkpoint|patrol|barracks|outpost|base|convoy)\s+"
+    r"(?:were\s+|was\s+)?(?:killed|shot|attacked|ambushed|injured|wounded|hit|targeted)"
+    r"|(?:killed|kills|killing)\s+(?:\d+\s+)?(?:policemen|police|soldiers?|troops?|officers?)"
+    r"|(?:attack|ambush|raid|assault|bombing|blast)\s+(?:on|at|against)\s+(?:a\s+)?"
+    r"(?:police|military|army|security|checkpoint|base|barracks|patrol|convoy|outpost)"
+    r"|terrorist attack|suicide attack|suicide bombing"
+    r"|(?:军警|警察|民警|士兵|官兵|哨所|检查站|巡逻队|基地|军营|营地|车队)"
+    r"(?:.{0,10})?(?:遭到?|被|受)(?:.{0,8})?(?:袭击|攻击|爆炸|伏击|突袭|枪击|冲击)"
+    r"|(?:军警|警察|士兵|官兵)(?:.{0,6})?(?:死亡|阵亡|遇害|受伤|伤亡)"
+    r"|(?:袭击|攻击|伏击|突袭)(?:了|了这)?(?:.{0,12})?(?:军警|哨所|检查站|巡逻|基地|军营|车队))")
+
+# 明确施害者信号（英文为主，中文的武装分子等在 TERROR_ZH 里）
+ATTACKER_SIGNAL = re.compile(
+    r"(?i)(terrorists?|militants?|insurgents?|jihadists?|extremists?|gunmen|"
+    r"assailants?|attackers?|perpetrators?|bombers?|suicide bomber|"
+    r"suspected militants|armed men|unknown gunmen)")
+
+# 「恐怖分子被击毙」是反恐战果，不是恐袭
+TERROR_KILLED = re.compile(
+    r"(?i)(?:terrorists?|militants?|insurgents?|gunmen|extremists?)\s+"
+    r"(?:were\s+|was\s+|have been\s+)?(?:killed|shot dead|shot|neutralized|neutralised|"
+    r"eliminated|arrested|detained)")
+
+# ---- 词袋式受害者判断 ----
+# 为什么不用相邻匹配：英文摘要常把被袭者名字夹在中间
+# （「Police officer Inam Ali was killed after being targeted」），
+# 角色词与死亡词隔了 3 个词，相邻正则全漏。
+# 改用「角色词 + 死亡词都在 + 没有主动击杀信号」三条件。
+GOV_ROLE = re.compile(
+    r"(?i)(policemen|police officers?|police|cops?|soldiers?|troops?|officers?|"
+    r"security (?:forces?|personnel|officers?)|army personnel|military personnel|"
+    r"paramilitar|checkpoint|patrol|barracks|outpost|convoy|"
+    r"polic[ií]a|policias|militares|soldados|agentes|fuerzas militares|"
+    r"军警|警察|民警|士兵|官兵|军方|军队|部队|政府军|哨所|检查站|巡逻队|车队|守备|驻军|基地)")
+
+VICTIM_WORD = re.compile(
+    r"(?i)(killed|shot dead|shot|attacked|ambushed|injured|wounded|dead|deaths?|"
+    r"assassinat|asesinad|muertos?|heridos?|atacad[oa]s?|"
+    r"遇袭|遭袭|被杀|遇害|阵亡|死亡|伤亡|受伤|牺牲)")
+
+# 主动击杀：主语是政府方在打人，不是被打
+GOV_AGGRESSIVE = re.compile(
+    r"(?i)((?:army|forces?|troops?|police|military|soldiers?|officers?)\s+"
+    r"(?:kills|raid|raided|foil|foiled|arrest|arrested|captur|capture|"
+    r"repel|repelled|liberat|rescue|rescued|seiz|seized|"
+    r"killed\s+(?:at\s+least\s+)?(?:\d+|several|many|dozens|scores))|neutraliz|"
+    r"击毙|击伤|清剿|围剿|逮捕|抓捕|抓获|缴获|挫败|收复|夺回|解救|救出)")
+
+# 纯匿名：只写「不明」「未知」，没给任何组织线索
+ANON_ZH = re.compile(r"^(不明|未知|身份不明|待查|不详|无|—|-|－)")
+
 # ---- 摘要兜底信号 ----
 # 行为体被脱敏（XXX100）或分方死亡缺失时，用摘要关键词做二次判定。
 # 实测：2026-07 有 140 条非洲条目摘要里有完整事件描述（如
@@ -151,17 +249,29 @@ def is_anon(s):
     必须降级为「需人工判」，不能靠国家/摘要硬猜 —— 否则哥伦比亚 190 条
     贩毒集团火并会被当成恐袭计入。
     """
-    return bool(ANON.match((s or "").strip()))
+    t = (s or "").strip()
+    if not t:
+        return False
+    if ANON.match(t):
+        return True
+    if ANON_ZH.match(t):
+        # 「不明（疑似IS关联细胞）」同时命中 ANON_ZH 和 TERROR_ZH。
+        # 有组织线索时不该当纯匿名处理 —— 否则 140 条脱敏样本又被搁置。
+        if TERROR_ZH.search(t) or STATE_ZH.search(t) or CRIMINAL_ZH.search(t):
+            return False
+        return True
+    return False
 
 
 def side_kind(s):
+    """判定行为体性质。英文 + 中文两套正则都要查。"""
     if not s:
         return "unknown"
-    if TERROR.search(s):
+    if TERROR.search(s) or TERROR_ZH.search(s):
         return "terror"
-    if STATE.search(s):
+    if STATE.search(s) or STATE_ZH.search(s):
         return "state"
-    if CRIMINAL.search(s):
+    if CRIMINAL.search(s) or CRIMINAL_ZH.search(s):
         return "criminal"
     return "unknown"
 
@@ -248,6 +358,68 @@ def judge(rec, min_deaths=1):
             "拉美区域的有组织犯罪/街头凶杀：UCDP 在该区域把帮派与刑案记为单方面暴力，"
             "不属恐怖主义")
 
+    ka, kb = side_kind(a), side_kind(b)
+    kinds = {ka, kb}
+
+    # ===== 主宾判断：不依赖 actor 字段的语义 =====
+    # UCDP 的 side_a 是「冲突一方」，多数时候是政府方。台账的「袭击者」列
+    # 直接抄了它，于是 actor_a 写成「Government of Iraq」—— 政府其实是受害者。
+    # 拿它当施害者会把整条判定链判反。这一段只从摘要的主宾关系判断谁打谁。
+    # 汇总结算条目必须最先拦：「Timeline (Terrorist Activities)」这类月度汇总
+    # 里含 terrorists/killed 字样，晚于施害者信号检查就会被当成一起事件。
+    if SRC_AGGREGATE.search(txt):
+        return "不计入", "N6", "汇总结算条目（月度汇总/时间线），不是单起事件"
+
+    txt_mil = bool(MILITARY_OP.search(txt))
+    txt_law = bool(LAW_ENFORCE.search(txt))
+    txt_victim = bool(GOV_VICTIM.search(txt)) or bool(
+        GOV_ROLE.search(txt) and VICTIM_WORD.search(txt)
+        and not GOV_AGGRESSIVE.search(txt))
+
+    # N5 军事作战：收复/清剿/进攻。有军警伤亡也是交战，不是恐袭。
+    if txt_mil:
+        if txt_victim:
+            return "保留", "X2", ("交战/军事作战（双方均有动作），"
+                                  "性质=交战，保留作对照、不计入统计")
+        return "不计入", "N5", "军事作战/清剿/收复行动（政府方为施动方），非恐怖袭击"
+
+    # N5 执法行动：逮捕/挫败/查获。没有军警伤亡时就是执法本身。
+    if txt_law and not txt_victim:
+        return "不计入", "N5", "国家力量的执法行动（逮捕/挫败/查获），非恐怖袭击"
+
+    # 政府方为受害方 -> 施害者按定义就是非国家行为体 = 恐怖袭击
+    #
+    # 这里不再额外要求「恐怖主义信号」。理由：政府方既然是被打的一方，
+    # 打它的要么是另一个国家（国家间战争，已由 INTERSTATE 排除），
+    # 要么是非国家武装（就是恐袭），要么是罪犯/事故（下面三条先拦掉）。
+    # 早前版本在这里要求必须命中 SRC_ATTACK，于是
+    # 「Police officer was killed after being targeted by unidentified assailants」
+    # 这类标准恐袭全被挡在门外（2026-07 真值集 44 条）。
+    if txt_victim:
+        if ("criminal" in kinds or CRIMINAL.search(txt) or CRIMINAL_ZH.search(txt)):
+            return "不计入", "N2", "犯罪/惯匪作案（政府方虽为受害方），非恐怖主义"
+        if ACCIDENT.search(txt):
+            return "不计入", "N3", "事故/非故意事件，非恐怖袭击"
+        if COMMUNAL.search(txt):
+            return "不计入", "N1", "社区/民族/部落冲突，非恐怖主义暴力"
+        if SRC_AGGREGATE.search(txt):
+            return "不计入", "N6", "汇总结算条目，不是单起事件"
+        return "计入", "P5", "非国家方袭击军警/政府目标（政府方为受害方）"
+
+    # ---- 明确施害者信号 ----
+    # 摘要里出现 terrorists/militants/gunmen 这类词，且有人死伤，就是恐袭。
+    # 不要求受害者的职业词能被 GOV_ROLE 认出来 —— 真值集里有
+    # 「Security official killed」「Four Frontier Corps personnel were killed」
+    # 「A customs personnel was killed」这类，职业词千变万化，列表永远补不全。
+    #
+    # 但必须先挡住反向表述：「At least five terrorists were killed」
+    # 「ISKP terrorists killed one」是反恐战果或已计入条目的重复表述，不是新一起恐袭。
+    if TERROR_KILLED.search(txt):
+        return "不计入", "N5", "恐怖分子被击毙/被抓获（反恐战果表述），非恐怖袭击"
+    if ATTACKER_SIGNAL.search(txt) and (VICTIM_WORD.search(txt) or deaths > 0 or civ > 0):
+        if not (ACCIDENT.search(txt) or COMMUNAL.search(txt)):
+            return "计入", "P1", "明确非国家施害者（terrorists/militants/gunmen）实施并造成伤亡"
+
     # 脱敏行为体 / 行为体全空 / 分方死亡缺失：先用摘要兜底判定，判不了才交人
     # 行为体空串必须和脱敏同等对待 —— 逐家遍历来的新闻候选两个字段都是空的，
     # 漏掉这个分支会让整批候选跳过兜底、直接落「需人工判」（实测 109/186）。
@@ -261,9 +433,6 @@ def judge(rec, min_deaths=1):
             return "不计入", "兜底", "行为体脱敏且无死亡记录"
         return "需人工判", "-", ("行为体被 UCDP 脱敏（%s/%s），摘要无足够信号；"
                                 "需看原文确认" % (a or "?", b or "?"))
-
-    ka, kb = side_kind(a), side_kind(b)
-    kinds = {ka, kb}
 
     # ===== 步0 M0：双方都是国家力量 =====
     if ka == "state" and kb == "state":
@@ -362,7 +531,7 @@ def judge(rec, min_deaths=1):
 
     # ===== 步2 正面判据 =====
     # P1：主体属恐怖组织且有实施证据
-    if "terror" in kinds and deaths >= min_deaths:
+    if "terror" in kinds and (deaths >= min_deaths or deaths_unknown):
         if civ > 0:
             return "计入", "P1+P4", "恐怖组织袭击致平民死亡 %d" % civ
         return "计入", "P1", "恐怖组织袭击，死亡 %d" % deaths
