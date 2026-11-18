@@ -294,7 +294,7 @@ def _days_diff(a, b):
 USED_URLS = set()
 
 
-def pick(urls, office, headline, evd=None):
+def pick(urls, office, headline, evd=None, deaths=None):
     """挑最可能的一条；返回 (url, note)。
 
     核心教训：早期版本「只要搜到链接就填」，10 条里约 5 条是错的
@@ -376,6 +376,24 @@ def pick(urls, office, headline, evd=None):
     scored.sort(key=lambda x: -x[0])
     s, url, title, hit, why = scored[0]
     note = "分%d 标题命中%d词 %s" % (s, hit, " ".join(why))
+
+    # 死亡数校验：这一套判据原本只看日期和标题词，不看死亡数。
+    # 后果：走 pick() 的条目无论链接多准，note 里都没有「死亡数对上了」，
+    # 下游按 note 定档时一律判「弱」。实测 225 条中文国家名事件里 99 条全弱，
+    # 链接本身是对的 —— 就是被这个吃掉的。
+    try:
+        _okp, _seenp = _deaths_in_text(url + " " + (title or ""), deaths)
+    except Exception:  # noqa: BLE001
+        _okp, _seenp = None, []
+    if _okp is True:
+        note += " 死亡数对上了"
+        if hit >= 3:
+            note = note.replace("分%d" % s, "置信度强 分%d" % s)
+    elif _okp is False:
+        note += " 死亡数未对上(见%s)" % _seenp
+    else:
+        note += " 标题未见死亡数"
+
     return url, note
 
 
@@ -551,6 +569,9 @@ def pick_structured(urls, rec, evd=None):
         # 早前版本要求「URL 有日期且差 <=7 天」才算强，结果大量新闻站 URL 不含日期，
         # 明明死亡数和地名都对上了也被压成「中」—— 把真实质量低估了。
         # 死亡数是最强指纹：别的事件不会凑巧也死 139 人。
+        # 强：死亡数对上 + 地名 >=2 个。不要求 URL 里有日期
+        # （大量新闻站 URL 不含日期，硬要求会把真实链接压成「中」）。
+        # 中：死亡数对上但地名只命中 1 个，或地名 >=2 但死亡数没在标题出现。
         strong = bool(num_ok) and len(hit) >= 2
         score = (len(hit) * 3 + (12 if num_ok else 0) +
                  (6 if strong else 0) + (2 if NEWS.search(url) else 0))
@@ -898,7 +919,9 @@ def main():
         else:
             url, note = pick(res, r.get("source_office"),
                              r.get("source_headline") or r.get("事件摘要"),
-                             event_date(r))
+                             event_date(r),
+                             r.get("deaths") if r.get("deaths") not in (None, "", 0)
+                             else r.get("死亡人数"))
         if url:
             USED_URLS.add(url)
         if url:
