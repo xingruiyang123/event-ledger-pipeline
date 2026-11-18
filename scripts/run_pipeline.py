@@ -516,6 +516,17 @@ def main():
                 run_step("覆盖率审计",
                          [os.path.join(HERE, "audit_coverage.py")] + srcargs +
                          ["--out", audit_md], expect=0, allow_fail=True)
+            # 双源死亡数比对：回答「权威库本身的数据可信度如何」
+            _uc = [x for x in parts if "01a_ucdp" in x]
+            _ac = [x for x in parts if "acled" in x.lower()]
+            if _uc and _ac:
+                run_step("双源死亡数比对",
+                         [os.path.join(HERE, "compare_sources.py"),
+                          "--a", _uc[0], "--b", _ac[0],
+                          "--a-name", "UCDP", "--b-name", "ACLED",
+                          "--out", os.path.join(od, "双源比对.md")],
+                         expect=0, allow_fail=True)
+
             run_step("跨源交叉核验",
                      [os.path.join(HERE, "cross_verify.py")] + srcargs +
                      ["--out", cross_out, "--report", cross_md],
