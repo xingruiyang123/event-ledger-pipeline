@@ -80,6 +80,75 @@ NEWS = re.compile(
     r"bangkokpost|nationthailand)")
 
 
+# 信源表：域名 -> 机构名。补链时把每条链接归属到机构，
+# 这样「补到链接」和「信源表覆盖了多少家」一次算完，不必分两步。
+REG_BY_DOM = {}
+
+
+def load_registry_domains(path):
+    if not path:
+        return {}
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(path, data_only=True)
+    except Exception as e:  # noqa: BLE001
+        print("  信源表读取失败：%s" % str(e)[:80])
+        return {}
+    ws = None
+    for w in wb.worksheets:
+        if w.max_row > 100:
+            ws = w
+            break
+    if ws is None:
+        ws = max(wb.worksheets, key=lambda w: w.max_row)
+    rows = list(ws.iter_rows(values_only=True))
+    hdr = [str(h or "").strip() for h in rows[0]]
+
+    def find(*keys):
+        for k in keys:
+            for i, h in enumerate(hdr):
+                if h == k:
+                    return i
+        for k in keys:
+            for i, h in enumerate(hdr):
+                if k and k in h:
+                    return i
+        return None
+
+    i_dom = find("主域名", "域名", "domain")
+    i_name = find("机构名称", "名称", "name")
+    out = {}
+    if i_dom is None:
+        return out
+    for r in rows[1:]:
+        if not r:
+            continue
+        d = str(r[i_dom] or "").strip().lower().replace("www.", "")
+        if d:
+            out[d] = str(r[i_name] or "") if i_name is not None else d
+    return out
+
+
+def org_of(url):
+    """URL 归属到信源表机构。返回 (机构名, 是否在名单内)。"""
+    try:
+        from urllib.parse import urlparse
+        h = urlparse(str(url or "")).netloc.replace("www.", "").lower()
+    except Exception:  # noqa: BLE001
+        return "", False
+    if not h:
+        return "", False
+    if h in REG_BY_DOM:
+        return REG_BY_DOM[h], True
+    # 子域兜底：english.aawsat.com -> aawsat.com 之类
+    parts = h.split(".")
+    for i in range(1, len(parts) - 1):
+        cand = ".".join(parts[i:])
+        if cand in REG_BY_DOM:
+            return REG_BY_DOM[cand], True
+    return "", False
+
+
 def clean_env():
     env = dict(os.environ)
     for k in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
@@ -153,7 +222,19 @@ def extract_results(raw):
 
 
 def url_date(url):
-    """从 URL 里猜日期，返回 (y,m,d) 或 None。"""
+    """从 URL 里猜日期，返回 (y,m,d) 或 None。
+
+    要认三种写法，少认一种就会有链接逃过日期校验：
+      /2025/08/07/      标准
+      /20251113/        紧凑 8 位（新华社、人民网英文版常用）
+      /2025/Aug/123/    英文月份
+    """
+    # 紧凑 8 位：20250807 / 20251113
+    m = re.search(r"[/t_](20\d{2})(\d{2})(\d{2})(?=[/\-_.]|$)", url)
+    if m:
+        y, mo, dd = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= dd <= 31:
+            return (y, mo, dd)
     m = re.search(r"/(20\d{2})[/\-_](\d{1,2})[/\-_](\d{1,2})(?=[/\-_.]|$)", url)
     if m:
         return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
@@ -321,7 +402,38 @@ def _deaths_in_text(text, deaths):
         return None, []
     # 死亡数容差：±50%，且允许「至少 N」「超过 N」这类表述
     lo, hi = max(1, int(d * 0.5)), int(d * 1.5) + 1
-    ok = any(lo <= v <= hi for v in nums)
+
+    # 光有数字不够：必须挨着死亡词才算数。
+    # 实测踩过：「nearly 90 attacks in a day」被当成「90 人死亡」，
+    # 而事件实际是 90 死 —— 数字对上了，事情完全不是一件。
+    DYING = r"(?i)(killed|dead|died|deaths?|fatalities|martyrs|casualt|"
+    DYING += r"死亡|遇难|丧生|罹难)"
+    ok = False
+    for mt in re.finditer(r"\b(\d{1,5})\b", t):
+        v = int(mt.group(1))
+        if not (lo <= v <= hi) or 1900 <= v <= 2100:
+            continue
+        # 判据是「数字后面 6 个词之内有死亡词」，不是「附近若干字符内有」。
+        # 字符窗口两头不讨好：24 太窄（「120 al-shabaab militants killed」
+        # 数字到 killed 隔 25 字符被切断后漏判）；40 太宽
+        #（「nearly 90 attacks in a day ... casualties」把 casualties 圈进来，误判）。
+        # 按词数卡正好对上「N killed」「N people dead」「over N women killed」这类表达。
+        tail = t[mt.end():mt.end() + 90]
+        words6 = re.findall(r"[a-z\u4e00-\u9fff]+", tail)[:6]
+        if re.search(DYING, " ".join(words6)):
+            ok = True
+            break
+    if not ok:
+        # 退一步：英文数词 + 死亡词
+        for w, v in NUM_WORDS.items():
+            if lo <= v <= hi and re.search(r"\b%s\b" % w, t):
+                for mm2 in re.finditer(r"\b%s\b" % w, t):
+                    seg = t[max(0, mm2.start() - 40):mm2.end() + 40]
+                    if re.search(DYING, seg):
+                        ok = True
+                        break
+                if ok:
+                    break
     return ok, nums[:8]
 
 
@@ -351,9 +463,20 @@ def pick_structured(urls, rec, evd=None):
         return "".join(c for c in t if not unicodedata.combining(c))
 
     # 地名/国家实词（≥4 字母，去通用词）
-    geo_raw = " ".join([str(rec.get("country") or ""),
-                        str(rec.get("place") or ""),
-                        str(rec.get("地区") or "")])
+    # 判定结果的字段名是中文（国家/地点），而候选池是英文（country/place）。
+    # 只认英文会让 pick_structured 直接判定「没有可用地名」——
+    # 实测全量跑时每一条都这样失败，看起来像「检索不到」，其实是字段没认。
+    _cty = (rec.get("country") or rec.get("国家") or "")
+    _plc = (rec.get("place") or rec.get("地点") or "")
+    geo_raw = " ".join([str(_cty), str(_plc), str(rec.get("地区") or "")])
+    # 中文国家名转英文，否则 url/标题全是英文，匹配不上
+    try:
+        from audit_coverage import ZH_TO_EN
+        _k = str(_cty).strip().lower()
+        if _k in ZH_TO_EN:
+            geo_raw += " " + ZH_TO_EN[_k]
+    except Exception:  # noqa: BLE001
+        pass
     GENERIC = {"province", "district", "region", "state", "county", "city",
                "north", "south", "east", "west", "central", "area", "town",
                "village", "near", "the", "and", "lower", "upper", "greater"}
@@ -384,7 +507,13 @@ def pick_structured(urls, rec, evd=None):
         #   事件「苏丹 死40」-> thehindu「killing 40」命中
         #   事件「布基纳法索 死40」-> voanews「kills four」不命中（4 ≠ 40）
         # 不加这条，上面两条会被同样处理，而后者是错链接。
-        num_ok, num_seen = _deaths_in_text(url + " " + (title or ""), rec.get("deaths"))
+        # 判定结果的死亡数字段叫「死亡人数」，候选池叫 deaths。
+        # 只认英文会让每条都判成「标题未见死亡数」→ 置信度全掉到「弱」，
+        # 明明 URL 里写着 151 也认不出来。实测踩过一次。
+        _dd2 = rec.get("deaths")
+        if _dd2 in (None, "", 0):
+            _dd2 = rec.get("死亡人数")
+        num_ok, num_seen = _deaths_in_text(url + " " + (title or ""), _dd2)
         if num_ok is False:
             continue
 
@@ -561,6 +690,7 @@ def build_query(rec):
 
 
 def main():
+    global REG_BY_DOM
     ap = argparse.ArgumentParser()
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", default=None)
@@ -570,6 +700,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=60, help="单次搜索超时秒")
     ap.add_argument("--sleep", type=float, default=1.0, help="每条之间的间隔秒数（防限流）")
     ap.add_argument("--dry-run", action="store_true", help="只打印查询，不实际搜索")
+    ap.add_argument("--registry", default=None,
+                    help="信源表 xlsx。给了就在补链时标注每条链接来自哪家机构、"
+                         "是否在名单内，并统计名单覆盖率")
     ap.add_argument("--budget-seconds", type=int, default=0,
                     help="总时间预算，到点就停并写回已补到的（0=不限）。"
                          "实测每条含 1 秒限速，2000 条要 33 分钟，全量要 4 小时 —— "
@@ -579,6 +712,10 @@ def main():
                     help="处理顺序。deaths=按死亡数降序（重要事件先补到链接），none=按原序")
     ap.add_argument("--fill", default="", help="xlsx 模式下用哪个值填（默认 信息来源URL）")
     a = ap.parse_args()
+
+    if a.registry:
+        REG_BY_DOM = load_registry_domains(a.registry)
+        print("信源表 %d 家（用于链接归属）" % len(REG_BY_DOM))
 
     if not os.path.isfile(a.inp):
         print("文件不存在：%s" % a.inp)
@@ -609,8 +746,11 @@ def main():
                         pass
             return 0
         todo.sort(key=_deaths, reverse=True)
-    if a.limit:
-        todo = todo[:a.limit]
+    # 注意：这里不截断 todo。limit 的含义是「最多发多少次检索」，
+    # 而免检条目（采集端已给媒体名、ACLED event_id）不发检索。
+    # 若在这里截断，免检条目一多就把检索配额吃光 ——
+    # 实测 --enrich-limit 15 时，前 15 条全是免检，一条真链接都没补。
+    _search_quota = a.limit or 0
     print("已有 URL：%d 条 ｜ 待补：%d 条" % (len(rows) - sum(1 for i in range(len(rows)) if not has_url(rows[i])), len(todo)))
     print()
 
@@ -630,6 +770,7 @@ def main():
         return 2
 
     filled = 0
+    n_searched = 0
     failed = []
     t0 = time.time()
     for n, i in enumerate(todo, 1):
@@ -651,16 +792,26 @@ def main():
         _m_src = re.search(r"\[src\]\s*(.+)$", _note)
         if _m_src and not str(r.get("信息来源URL") or r.get("url") or "").startswith("http"):
             _hint = _m_src.group(1).strip()[:160]
-            _txt = "[媒体名来源] " + _hint
+            # 「无来源线索」是采集端没拿到媒体名时的占位，不是真的来源。
+            # 不排掉它，这一批 15 条全被当成「免检通过」，
+            # 结果一条真实链接都没补，覆盖率审计拿到 0 个域名。
+            if not _hint or _hint in ("无来源线索", "-", "None", "无"):
+                _hint = ""
+            _txt = ("[媒体名来源] " + _hint) if _hint else ""
             if str(a.out or "").lower().endswith((".xlsx", ".xlsm")):
                 r[a.fill or "信息来源URL"] = _txt
             else:
                 r["source_note"] = _txt
                 r[a.fill or "信息来源URL"] = _txt
-            filled += 1
-            if n % 200 == 0 or n == len(todo):
-                print("  [%d/%d] ✓(采集端来源免检) 已补 %d" % (n, len(todo), filled), flush=True)
-            continue
+            if not _hint:
+                # 没有真来源，继续走检索补链，不要在这里「免检通过」
+                pass
+            else:
+                filled += 1
+                if n % 200 == 0 or n == len(todo):
+                    print("  [%d/%d] ✓(采集端来源免检) 已补 %d"
+                          % (n, len(todo), filled), flush=True)
+                continue
 
         # ACLED 条目识别：不能靠 extra（judge 转 19 列时已丢），也不能靠 source
         # （同样丢了）。用 event_id 的固定格式：三字母国家码 + 7 位数字，如 MEX100025。
@@ -681,6 +832,12 @@ def main():
             if n % 5 == 0 or n == len(todo):
                 print("  [%d/%d] ✓(ACLED免检) 已补 %d" % (n, len(todo), filled), flush=True)
             continue
+
+        # 检索配额：只数真正发出的检索
+        if _search_quota and n_searched >= _search_quota:
+            print("  ⏹  检索配额 %d 条已用完，停止（免检条目不受此限）" % _search_quota)
+            break
+        n_searched += 1
 
         q = build_query(r)
         raw = run_search(a.search_cmd, q, a.timeout)
@@ -712,6 +869,10 @@ def main():
                 r["source_note"] = note
                 r["link_confidence"] = ("强" if "置信度强" in note else
                                         "中" if "置信度中" in note else "弱")
+                if REG_BY_DOM:
+                    _org, _in = org_of(url)
+                    r["source_org"] = _org
+                    r["in_registry"] = "是" if _in else "否"
             filled += 1
             mark = "✓"
         else:
@@ -726,6 +887,19 @@ def main():
 
     print()
     print("补到链接：%d / %d 条" % (filled, len(todo)))
+
+    # 信源表覆盖率：补到的链接里有多少条来自名单内机构
+    if REG_BY_DOM:
+        from collections import Counter as _C
+        _ins = _C()
+        for r in rows:
+            if str(r.get("in_registry") or "") in ("是", "否"):
+                _ins[r["in_registry"]] += 1
+        _tot = sum(_ins.values())
+        if _tot:
+            print("信源表归属：名单内 %d 条 / 名单外 %d 条 = 覆盖 %.0f%%"
+                  % (_ins.get("是", 0), _ins.get("否", 0),
+                     100.0 * _ins.get("是", 0) / _tot))
 
     # 导出
     if a.out:

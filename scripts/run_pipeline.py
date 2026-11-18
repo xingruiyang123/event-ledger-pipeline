@@ -570,6 +570,9 @@ def main():
                      "--in", judged, "--out", judged_url,
                      "--search-cmd", a.search_cmd,
                      "--budget-seconds", str(a.enrich_budget)]
+            # 传信源表：补链时顺便把每条链接归属到机构，一次算完覆盖率
+            if a.registry and os.path.isfile(a.registry):
+                eargs += ["--registry", a.registry]
             if a.enrich_limit:
                 eargs += ["--limit", str(a.enrich_limit)]
             run_step("补信息来源URL（限 %d 条 / %d 秒）"
@@ -577,6 +580,23 @@ def main():
                      eargs, allow_fail=True)
             if os.path.isfile(judged_url):
                 judged = judged_url
+
+    # ---- 信源表覆盖度审计 ----
+    # 这一步回答「我们的名单到底覆盖了多少真实报道这些事件的媒体」。
+    # 必须放在补链之后：补链结果里的域名才是实际用到的媒体。
+    if a.registry and os.path.isfile(a.registry):
+        rcargs = [os.path.join(HERE, "audit_registry_coverage.py"),
+                  "--registry", a.registry,
+                  "--out", os.path.join(od, "信源覆盖.md")]
+        if os.path.isfile(cand):
+            rcargs += ["--events", cand]
+        # 补链结果优先；没有就退回判定结果（那样覆盖率会低，但不会崩）
+        _linked = os.path.join(od, "02_判定_带链接.json")
+        if os.path.isfile(_linked):
+            rcargs += ["--linked", _linked]
+        elif os.path.isfile(judged):
+            rcargs += ["--linked", judged]
+        run_step("信源表覆盖度审计", rcargs, expect=0, allow_fail=True)
 
     if a.stage in ("judge",):
         return 0
