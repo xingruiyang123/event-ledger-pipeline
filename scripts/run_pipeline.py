@@ -31,6 +31,7 @@
 """
 import argparse
 import hashlib
+import io
 import json
 import os
 import re
@@ -214,6 +215,21 @@ def write_coverage_note(path, month, contributions, judged, ledger_rows):
     lines.append("- 判定后进台账：**%d** 条" % ledger_rows)
     lines.append("- 非致命（死亡=0）事件：**%d** 条" % (judged.get("zero_death", 0)))
     lines.append("- 未遂/被挫败事件：**%d** 条" % (judged.get("attempted", 0)))
+    vf = judged.get("verify") or {}
+    if vf:
+        ev = vf.get("events") or 0
+        mu = vf.get("multi") or 0
+        ag = vf.get("aggregate") or 0
+        lines.append("- 跨源合并后独立事件：**%d** 个" % ev)
+        if ev:
+            lines.append("- 其中被两个源以上印证：**%d** 个（%.1f%%）"
+                         % (mu, 100.0 * mu / ev))
+            lines.append("- 识别出累计/汇总条目：**%d** 个（已排除出事件统计）" % ag)
+            if ev and mu / ev < 0.05:
+                lines.append("")
+                lines.append("> ⚠️ 多源印证比例很低（<5%）。说明绝大多数事件只有一个来源记录，")
+                lines.append("> 交付时应标注「单源，待核」，不能当定论。")
+
     dist = judged.get("country_dist") or []
     if dist:
         tot = sum(n for _, n in dist) or 1
@@ -262,6 +278,10 @@ def main():
                     help="信源表 xlsx。给了就并行走「逐家遍历」，补 UCDP 收不到的非致命/未遂事件")
     ap.add_argument("--registry-limit", type=int, default=0,
                     help="逐家遍历只跑前 N 家（0=全部）。先小样本试时用")
+    ap.add_argument("--audit", action="store_true", default=True,
+                    help="产源后自动跑覆盖率审计与跨源交叉核验（默认开）")
+    ap.add_argument("--no-audit", dest="audit", action="store_false",
+                    help="关掉覆盖率审计")
     ap.add_argument("--enrich-limit", type=int, default=300,
                     help="补「信息来源URL」最多处理多少条（默认 300，按死亡数降序优先）。"
                          "0=不限 —— 但每条含 1 秒限速，全量会跑几小时")
@@ -494,6 +514,27 @@ def main():
             except Exception:  # noqa: BLE001
                 pass
 
+        # ---- 覆盖率自证 + 跨源交叉核验 ----
+        # 这两步不是可选项：交付物要能回答「你们漏没漏」和「每条凭什么可信」。
+        # 只报台账不报覆盖率，等于让人相信我们刚好把该收的都收到了。
+        cross_out = os.path.join(od, "01x_合并事件.jsonl")
+        cross_md = os.path.join(od, "交叉核验.md")
+        audit_md = os.path.join(od, "覆盖率审计.md")
+        if a.audit and len(parts) >= 1:
+            srcargs = []
+            for pth in parts:
+                nm0 = os.path.splitext(os.path.basename(pth))[0]
+                nm0 = nm0.replace("01a_", "").replace("01b_", "").replace("01d_", "")
+                srcargs += ["--src", "%s=%s" % (nm0, pth)]
+            if len(srcargs) >= 4:
+                run_step("覆盖率审计",
+                         [os.path.join(HERE, "audit_coverage.py")] + srcargs +
+                         ["--out", audit_md], expect=0, allow_fail=True)
+            run_step("跨源交叉核验",
+                     [os.path.join(HERE, "cross_verify.py")] + srcargs +
+                     ["--out", cross_out, "--report", cross_md],
+                     expect=0, allow_fail=True)
+
         # 采集后必须校验：0 条候选不许继续往下跑
         # 实测：候选集只有 2026-09，查 2025-08 会命中 0 条，
         # 但流水线一路空转到底，最后只报「找不到判定结果」，让人以为是自己的问题。
@@ -534,12 +575,17 @@ def main():
         run_step("战争语境分流", [os.path.join(HERE, "filter_war_context.py"),
                                "--in", ev, "--out", sp], allow_fail=True)
 
-        run_step("判定（判定链）", [os.path.join(HERE, "judge_events.py"),
-                                 "--in", cand, "--out", judged,
-                                 "--out-manual", os.path.join(od, "02_需人工判.json"),
-                                 # 显式给 0：口径要求未遂与零伤亡照常计入
-                                 "--min-deaths", "0"],
-                 allow_fail=True)
+        jargs = [os.path.join(HERE, "judge_events.py"),
+                 "--in", cand, "--out", judged,
+                 "--out-manual", os.path.join(od, "02_需人工判.json"),
+                 # 显式给 0：口径要求未遂与零伤亡照常计入
+                 "--min-deaths", "0"]
+        # 把跨源核验结果传进去：19 列台账的「置信度」列要写 A/B，
+        # 而 A 的定义是「两个以上独立源都记了」—— 判定链自己看不到别的源，只能靠这份映射。
+        _vmap = os.path.join(od, "01x_合并事件.jsonl.idx.json")
+        if os.path.isfile(_vmap):
+            jargs += ["--verify-map", _vmap]
+        run_step("判定（判定链）", jargs, allow_fail=True)
         print("")
         print("  ℹ️  「需人工判」不是「待定」，是明确的动作：逐条看原文判完写回。")
         print("     判定规则可改：edit scripts/judge_events.py 里的 judge() 函数。")
@@ -632,9 +678,31 @@ def main():
             pass
 
         cn = os.path.join(od, "覆盖边界声明.md")
+        # 多源印证率：从交叉核验结果里读，写进声明。
+        # 这是「可复核」最直接的一个数：多少条有两个源都记了。
+        verify_stat = {}
+        if os.path.isfile(cross_out):
+            try:
+                _n = _multi = _agg = 0
+                with io.open(cross_out, encoding="utf-8") as _f:
+                    for _ln in _f:
+                        _ln = _ln.strip()
+                        if not _ln:
+                            continue
+                        _o = json.loads(_ln)
+                        _n += 1
+                        if (_o.get("n_sources") or 1) >= 2:
+                            _multi += 1
+                        if _o.get("is_aggregate"):
+                            _agg += 1
+                verify_stat = {"events": _n, "multi": _multi, "aggregate": _agg}
+            except Exception:  # noqa: BLE001
+                pass
+
         write_coverage_note(cn, a.month, contrib,
                             {"zero_death": zero_death, "attempted": attempted,
-                             "country_dist": country_dist}, nled)
+                             "country_dist": country_dist,
+                             "verify": verify_stat}, nled)
         print("\n  覆盖边界声明 → %s" % cn)
         if zero_death + attempted <= 2 and nled > 20:
             print("")

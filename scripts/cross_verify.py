@@ -309,6 +309,27 @@ def main():
     print()
     print("已写出 → %s" % a.out)
 
+    # 附一份映射：原始事件 ID -> 该簇被几个源印证。
+    # 判定环节要往 19 列台账的「置信度」列写 A/B，而那个字段必须来自跨源印证，
+    # 不能靠判定链自己猜。没有这份映射，判定只能看到单条候选，n_sources 恒为 0。
+    map_path = a.out + ".idx.json"
+    idx = {}
+    for r in merged:
+        ns = r.get("n_sources") or 1
+        for sid in (r.get("source_ids") or []):
+            idx[sid] = {"n": ns, "agg": bool(r.get("is_aggregate"))}
+        rid = r.get("raw_id")
+        if rid:
+            idx[str(rid)] = {"n": ns, "agg": bool(r.get("is_aggregate"))}
+        for k, v in (r.get("deaths_by_source") or {}).items():
+            pass
+    try:
+        with io.open(map_path, "w", encoding="utf-8") as f:
+            json.dump(idx, f, ensure_ascii=False)
+        print("印证映射 → %s（%d 条 ID）" % (map_path, len(idx)))
+    except Exception as e:  # noqa: BLE001
+        print("印证映射写出失败：%s" % str(e)[:80])
+
     if a.report:
         lines = ["# 交叉核验报告", ""]
         lines.append("## 一、输入")

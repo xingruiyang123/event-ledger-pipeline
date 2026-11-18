@@ -32,7 +32,9 @@
 退出码：0 = 判定完成 | 2 = 判定后计入条数为 0（数据或口径有问题）| 1 = 无法判定
 """
 import argparse
+import io
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -604,13 +606,36 @@ def _src_hint(rec):
     return hint or "无来源线索"
 
 
+# 跨源印证映射：raw_id -> {n: 几个源印证, agg: 是否累计条目}
+# 由 cross_verify.py 产出，judge_events.py --verify-map 传入。
+# 判定链自己看不到「别的源有没有记这件事」，只能靠这份映射。
+VERIFY_MAP = {}
+
+
+def _n_sources(rec):
+    """这条记录被几个源印证。优先查映射，查不到就退回自带的 n_sources。"""
+    rid = str(rec.get("raw_id") or "")
+    if rid and rid in VERIFY_MAP:
+        return int(VERIFY_MAP[rid].get("n") or 1)
+    ex = rec.get("extra") or {}
+    for k in ("acled_event_id", "ged_id"):
+        v = ex.get(k)
+        if v and str(v) in VERIFY_MAP:
+            return int(VERIFY_MAP[str(v)].get("n") or 1)
+    ns = ex.get("n_sources") or 0
+    try:
+        return int(ns)
+    except Exception:  # noqa: BLE001
+        return 0
+
+
 def to_row(rec, verdict, chain, note):
     d = rec.get("date") or ""
     try:
         y, mo, dd = int(d[:4]), int(d[5:7]), int(d[8:10])
     except Exception:  # noqa: BLE001
         y = mo = dd = ""
-    ns = rec.get("extra", {}).get("n_sources") or 0
+    ns = _n_sources(rec)
     return {
         "事件摘要": (rec.get("summary") or "")[:200],
         "国家": rec.get("country") or "",
@@ -625,6 +650,8 @@ def to_row(rec, verdict, chain, note):
         "信息来源URL": rec.get("url") or "",
         "采集人/组别": "",
         "录入日期": "",
+        # A = 两个及以上独立源都记了这件事；B = 只有一个源。
+        # 不是「我们有多相信自己的判断」，而是「这件事有几个独立来源」。
         "置信度": "A" if ns >= 2 else "B",
         "审核状态": "已确认" if verdict == "计入" else ("待审核" if verdict == "需人工判" else "已退回"),
         "关联知识点": chain,
@@ -638,6 +665,9 @@ def main():
     ap.add_argument("--in", dest="inp", required=True)
     ap.add_argument("--out", dest="out", default=None, help="计入的台账数据（json 数组）")
     ap.add_argument("--out-excluded", default=None, help="不计入的（json 数组）")
+    ap.add_argument("--verify-map", default=None,
+                    help="cross_verify.py 产出的印证映射（*.idx.json）。"
+                         "给了才能把「几个源印证」写进置信度列")
     ap.add_argument("--out-manual", default=None, help="需人工判的（json 数组）")
     ap.add_argument("--out-keep", default=None, help="保留作对照的（反恐行动/交战，不计入统计）")
     ap.add_argument("--min-deaths", type=int, default=0,
@@ -645,6 +675,15 @@ def main():
                          "口径要求未遂、零伤亡照常计入，设成 1 会把它们全挡掉")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
+
+    global VERIFY_MAP
+    if a.verify_map and os.path.isfile(a.verify_map):
+        try:
+            with io.open(a.verify_map, encoding="utf-8") as f:
+                VERIFY_MAP = json.load(f) or {}
+            print("印证映射：%d 条 ID（跨源核验结果）" % len(VERIFY_MAP))
+        except Exception as e:  # noqa: BLE001
+            print("印证映射读取失败：%s" % str(e)[:100])
 
     rows = []
     with open(a.inp, encoding="utf-8") as f:
