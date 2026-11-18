@@ -54,7 +54,20 @@ BAD_URL_WORD = re.compile(
 
 AGGREGATE = re.compile(
     r"(?i)(/timeline|/statistics|/statistic|/archive|/category/|/tag/|/topics?/|"
-    r"terrorist-activity|/data/|/index)")
+    r"terrorist-activity|/data/|/index|"
+    # 实测抓出来的汇总页/非事件页。这些链接地名和国家都对得上，
+    # 但内容不是「这一起事件」的报道：
+    r"/wiki/|list_of_|list-of-|/dashboard|/publications/report|"
+    r"/country-focus/|/global-conflict-tracker|/map/|/explainer|/backgrounder|"
+    r"situation-report|humanitarian-response|/monitor/)")
+
+# 垃圾/镜像域名：随机字符串域名、内容农场。
+# 实测出现过 ergngevd.top/wiki/List_of_massacres_in_Burkina_Faso 这种。
+# 只按 TLD 判，不按域名长度 —— 早前用 [a-z]{8,} 会把 nivonews.com、
+# vanguardngr.com 这类正常媒体一起拦掉。
+JUNK_DOMAIN = re.compile(
+    r"(?i)\.(?:top|xyz|click|buzz|loan|work|men|date|review|country|stream)$"
+    r"|^(?:[a-z0-9]{16,})\.")
 
 BLOCK = re.compile(
     r"(?i)(facebook\.com|twitter\.com|x\.com/|instagram\.com|tiktok\.com|"
@@ -489,6 +502,13 @@ def pick_structured(urls, rec, evd=None):
     for url, title in urls:
         if BLOCK.search(url) or AGGREGATE.search(url) or BAD_URL_WORD.search(url):
             continue
+        try:
+            from urllib.parse import urlparse
+            _h = urlparse(url).netloc.replace("www.", "")
+            if JUNK_DOMAIN.search(_h):
+                continue
+        except Exception:  # noqa: BLE001
+            pass
         hay = norm(url) + " " + norm(title)
         hit = [w for w in geo if w in hay]
         if not hit:
@@ -803,8 +823,12 @@ def main():
             else:
                 r["source_note"] = _txt
                 r[a.fill or "信息来源URL"] = _txt
-            if not _hint:
-                # 没有真来源，继续走检索补链，不要在这里「免检通过」
+            # 关键：只有 [src] 里已经是 URL 才免检。
+            # [src] 里放的是「媒体名 + 标题」——那是线索，不是可点击链接。
+            # 台账 100% 有 [src]，若一律免检就一条 URL 都补不到
+            # （实测：2568 行台账，补链后只有 22 条有 URL）。
+            if not _hint or not re.search(r"https?://", _hint):
+                # 继续走检索
                 pass
             else:
                 filled += 1
