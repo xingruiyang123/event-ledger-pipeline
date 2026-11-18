@@ -231,12 +231,56 @@ GOV_AGGRESSIVE = re.compile(
     r"|(?:击毙|击伤|清剿|围剿|逮捕|抓捕|抓获|缴获|挫败|收复|夺回|解救|救出)"
     r")")
 
+# 国家单方军事行动：国家军队/边防/警察对平民或其他方动用武力。
+# 判据是「主语为国家武装力量」且「动词为动用武力」，
+# 且不是「被袭击」（被动语态由后面的正面判据处理）。
+STATE_UNILATERAL = re.compile(
+    r"(?i)("
+    # 俄军打击 / 以军开火 / 土耳其宪兵
+    r"\b(?:Russian|Israeli|Turkish|Iranian|Syrian|Iraqi|Saudi|Emirati|"
+    r"Egyptian|Ethiopian|Sudanese|Burmese|Chinese|Indian|Pakistani|"
+    r"American|US)\s+"
+    r"(?:troops?|forces?|army|military|soldiers?|jandarma|gendarmerie|"
+    r"airstrikes?|air\s+strikes?|warplanes?|jets?|drones?)\b"
+    r"[^.;]{0,40}?"
+    r"\b(?:strikes?|struck|strike|bomb(?:ed|ing)?|shell(?:ed|ing)?|"
+    r"fire|fired|kill(?:ed|s)?|raid(?:ed)?|attack(?:ed)?)\b"
+    # 中文
+    r"|(?:俄军|以军|土军|美军|政府军|边防军|宪兵)[^。；]{0,30}"
+    r"(?:空袭|炮击|打击|开火|射杀|击毙)"
+    r")")
+
 # 中文「我方被袭」语境：出现这些词说明事件本体是恐袭，
 # 政府方击毙只是反击结果，不该整条判成反恐行动。
 # 实测误伤：「Cross Kauwa ISWAP未遂渗透中，军方击毙ISWAP宣传组组长」——
 # 用户判定该条 include（未遂恐袭成立）。
 ZH_VICTIM_CTX = re.compile(
     r"(未遂|渗透|遭袭|遇袭|伏击|袭击中|被袭|阵亡|遇难|丧生|被打死)")
+
+# 摘要没有实质内容：只有话题标签、只有角色词、或极短。
+# 实测 2026-07：50 条抽样里有 4 条是 "#Mali" / "#Mali;#Mali;#Mali" /
+# "A police officer" 这种 —— 摘要抽取失败，把标签或残句当成了事件描述。
+# 这类无法核实，不该计入台账。
+EMPTY_SUMMARY = re.compile(
+    r"^(?:[#@][\w\u4e00-\u9fff]+[;；,\s]*)+$"          # 纯标签
+    r"|^[A-Za-z ]{0,30}(?:officer|soldier|policeman|person|man|woman)"
+    r"\s*[.,]?$"                                          # 只有角色词
+    r"|^[\s;；,，.。\-#@]*$"                              # 空白
+)
+
+
+def is_empty_summary(txt):
+    """摘要是否没有实质内容（只有标签/残句/空白）。"""
+    t = str(txt or "").strip()
+    if len(t) < 12:
+        return True
+    if not EMPTY_SUMMARY.match(t):
+        return False
+    # "#Mali;#Mali" 这类去掉标签后基本为空
+    stripped = re.sub(r"[#@][\w\u4e00-\u9fff]+", "", t)
+    stripped = re.sub(r"[;；,，\s\-]+", "", stripped)
+    return len(stripped) < 8
+
 
 # 纯匿名：只写「不明」「未知」，没给任何组织线索
 ANON_ZH = re.compile(r"^(不明|未知|身份不明|待查|不详|无|—|-|－)")
@@ -265,7 +309,21 @@ SRC_COMMUNAL = re.compile(
     r"(?i)(Fulani|herders?|herdsmen|farmers?[- ]herders?|Plateau|community (?:attack|clash)|communal|cattle|livestock|land (?:conflict|dispute))")
 
 # 汇总条目（不是单起事件）
-SRC_AGGREGATE = re.compile(r"(?i)(Timeline\s*.{0,8}Terrorist|monthly (?:report|newsletter|roundup|summary))")
+# 综述/简报/周报类：不是单起事件。
+# 原来只认 "Timeline ... Terrorist" 和 "monthly report"，实测漏掉：
+#   CIMP WEEKLY HIGHLIGHTS 16 - 22 JULY 2026
+#   Congo War Security Review: July 24, 2026
+#   Africa Research Bulletin: Political, Social and Cultural Series Volume 63
+#   WRAPUP 13-US strikes Iran ...
+SRC_AGGREGATE = re.compile(
+    r"(?i)(Timeline\s*.{0,8}Terrorist"
+    r"|monthly (?:report|newsletter|roundup|summary)"
+    r"|WEEKLY HIGHLIGHTS|weekly (?:roundup|review|summary|digest)"
+    r"|(?:war|security)\s+review"
+    r"|Research Bulletin|Political, Social and Cultural Series"
+    r"|\bWRAPUP\b|\bROUNDUP\b"
+    r"|(?:monthly|weekly)\s+(?:highlights|brief|monitor)"
+    r")")
 
 # 其他排除信号（土地冲突/普通刑案/交通事故）
 SRC_EXCLUDE = re.compile(
@@ -449,6 +507,24 @@ def judge(rec, min_deaths=0):
     # 早前版本在这里要求必须命中 SRC_ATTACK，于是
     # 「Police officer was killed after being targeted by unidentified assailants」
     # 这类标准恐袭全被挡在门外（2026-07 真值集 44 条）。
+    # ---- 国家单方军事行动（X3）----
+    # 国家军队/边防对另一国或本国平民动用武力，是「国家行为」，
+    # 不属于「非国家行为体实施的恐怖袭击」。
+    # 已有 M0/INTERSTATE 只认「双方均为国家力量」的表述，漏了单方行动：
+    #   Russian troops strike KABs on Kharkiv - one person killed
+    #   Israeli fire kills seven people in Gaza
+    #   Turkish Jandarma kill young man while attempting to cross
+    # 这些在 50 条抽样里占 3 条。
+    if STATE_UNILATERAL.search(txt):
+        return ("不计入", "X3",
+                "国家单方军事行动（军队/边防动用武力），非非国家行为体恐袭")
+
+    # ---- 无内容条目闸门（X0）----
+    # 摘要只有标签（"#Mali"）或只有角色词（"A police officer"），
+    # 说明抽取失败。这类无法核实，不计入。
+    if is_empty_summary(txt):
+        return ("不计入", "X0", "摘要无实质内容（只有标签/残句），无法核实")
+
     # ---- 反恐战果闸门（X2）----
     # 「安全部队击毙/抓获 N 名恐怖分子」是反恐行动，不是恐怖袭击。
     # 本库口径：计入的是「非国家方袭击政府/军警/平民」；政府方主动出击
