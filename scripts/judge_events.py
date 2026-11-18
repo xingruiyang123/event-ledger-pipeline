@@ -315,6 +315,41 @@ SRC_COMMUNAL = re.compile(
 #   Congo War Security Review: July 24, 2026
 #   Africa Research Bulletin: Political, Social and Cultural Series Volume 63
 #   WRAPUP 13-US strikes Iran ...
+# 恐怖主义线索：组织名 / 明确行为体词。用于配合结构化字段判断
+# 「平民死亡」到底是恐袭还是普通刑案。
+TERROR_ORG = re.compile(
+    r"(?i)(\bISIS\b|\bISIL\b|\bIS\b|ISWAP|ISKP|IS-K|Boko\s*Haram|"
+    r"al-?Shabaab|al-?Shabab|JNIM|AQAP|AQIM|\bTTP\b|Tehreek-?e-?Taliban|"
+    r"\bBLA\b|Baloch|\bADF\b|\bM23\b|\bFDLR\b|\bCODECO\b|"
+    r"\bASWJ\b|\bMAC\b|\bRDF\b|\bSNA\b|\bNISA\b|"
+    r"Hayat Tahrir|HTS|PKK|YPG|Hezbollah|Hamas|Jihad|Jihadist|"
+    r"Taliban|Houthi|Ansar|Mahdi|RSF|Wagner|"
+    r"terroris|militant|insurgent|jihadi|extremist|gunmen|assailant|"
+    r"恐怖|武装分子|极端|叛乱| jihad)"
+)
+
+
+def _extra_of(rec):
+    """取 extra 字典（可能是 dict 或 json 字符串）。"""
+    e = rec.get("extra") if isinstance(rec, dict) else None
+    if isinstance(e, dict):
+        return e
+    if isinstance(e, str) and e.strip().startswith("{"):
+        try:
+            return json.loads(e)
+        except Exception:  # noqa: BLE001
+            return {}
+    return {}
+
+
+def _i(v):
+    try:
+        return int(float(str(v)))
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+# 结构化闸门开关：被 judge() 调用时同步
 SRC_AGGREGATE = re.compile(
     r"(?i)(Timeline\s*.{0,8}Terrorist"
     r"|monthly (?:report|newsletter|roundup|summary)"
@@ -518,6 +553,30 @@ def judge(rec, min_deaths=0):
     if STATE_UNILATERAL.search(txt):
         return ("不计入", "X3",
                 "国家单方军事行动（军队/边防动用武力），非非国家行为体恐袭")
+
+    # ---- 结构化闸门（S1/S2）----
+    # 用 UCDP 的分方死亡判方向，而不是只看摘要措辞。
+    # 这些字段一直存在但判定链没用过，是精确率低的根因。
+    _e = _extra_of(rec)
+    if _e:
+        _a = _i(_e.get("deaths_a"))
+        _b = _i(_e.get("deaths_b"))
+        _civ = _i(_e.get("deaths_civilians"))
+        _unk = _i(_e.get("deaths_unknown"))
+        _tv = str(_e.get("type_of_violence") or "")
+
+        # S1：只有非国家方死亡 → 政府方战果，反恐行动
+        if _b > 0 and _a == 0 and _civ == 0:
+            return ("保留", "S1",
+                    "UCDP 分方死亡仅非国家方（a=0,b=%d），系政府方战果，保留作对照"
+                    % _b)
+
+        # S2：分方死亡全 0，但摘要声称有死亡 → 数据自相矛盾，不硬判
+        if _a == 0 and _b == 0 and _civ == 0 and _unk == 0 and deaths > 0:
+            if not TERROR_ORG.search(txt):
+                return ("需人工判", "-",
+                        "UCDP 分方死亡全 0 但摘要称死 %d 人，且无组织线索，需看原文"
+                        % deaths)
 
     # ---- 无内容条目闸门（X0）----
     # 摘要只有标签（"#Mali"）或只有角色词（"A police officer"），
