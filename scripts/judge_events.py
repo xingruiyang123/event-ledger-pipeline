@@ -204,12 +204,39 @@ VICTIM_WORD = re.compile(
     r"遇袭|遭袭|被杀|遇害|阵亡|死亡|伤亡|受伤|牺牲)")
 
 # 主动击杀：主语是政府方在打人，不是被打
+# 英文数字词：正则里只写 \d+ 会漏 "killed four militants" 这类。
+_NUMW = (r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+         r"twelve|fifteen|twenty|thirty|fifty|several|many|dozens|scores)")
+
+# 政府方主体：含常用缩写。实测漏掉 SFs 会让
+# 「Security Forces (SFs) killed four Fitna al-Hindustan」走到 P5 被计入。
+_GOV_SUBJ = (r"(?:army|security|forces?|troops?|police|military|soldiers?|officers?|"
+             r"SFs?|SNA|NISA|BDF|FDS|FACA|ISF|RSF|armée|militaires)")
+
 GOV_AGGRESSIVE = re.compile(
-    r"(?i)((?:army|forces?|troops?|police|military|soldiers?|officers?)\s+"
-    r"(?:kills|raid|raided|foil|foiled|arrest|arrested|captur|capture|"
+    r"(?i)("
+    # 政府方名词 + 主动动词（含「killed N 个」）
+    # 允许中间夹括号缩写："Security Forces (SFs) killed four ..."
+    r"(?:" + _GOV_SUBJ + r")\s*(?:\([^)]{0,15}\)\s*)?"
+    # kill 必须带词边界：不加 \b 时 "kill" 会匹配 "killed" 的前四个字母，
+    # 把「officers killed」（被袭）误判成「officers kill」（主动击杀）。
+    # 实测因此误伤 3 条真恐袭（印度/肯尼亚/巴基斯坦各 1 条）。
+    # 主动过去时「Army killed six」由下面的 killed+NUMW 分支兜住。
+    r"(?:kills?\b|raid|raided|foil|foiled|arrest|arrested|captur|capture|"
     r"repel|repelled|liberat|rescue|rescued|seiz|seized|"
-    r"killed\s+(?:at\s+least\s+)?(?:\d+|several|many|dozens|scores))|neutraliz|"
-    r"击毙|击伤|清剿|围剿|逮捕|抓捕|抓获|缴获|挫败|收复|夺回|解救|救出)")
+    r"killed\s+(?:at\s+least\s+)?" + _NUMW + r")"
+    # 标题式：ELIMINATED: / KILLED: / NEUTRALIZED: 开头
+    r"|^(?:ELIMINATED|KILLED|NEUTRALI[SZ]ED|TARGETED)\s*:"
+    r"|neutraliz"
+    r"|(?:击毙|击伤|清剿|围剿|逮捕|抓捕|抓获|缴获|挫败|收复|夺回|解救|救出)"
+    r")")
+
+# 中文「我方被袭」语境：出现这些词说明事件本体是恐袭，
+# 政府方击毙只是反击结果，不该整条判成反恐行动。
+# 实测误伤：「Cross Kauwa ISWAP未遂渗透中，军方击毙ISWAP宣传组组长」——
+# 用户判定该条 include（未遂恐袭成立）。
+ZH_VICTIM_CTX = re.compile(
+    r"(未遂|渗透|遭袭|遇袭|伏击|袭击中|被袭|阵亡|遇难|丧生|被打死)")
 
 # 纯匿名：只写「不明」「未知」，没给任何组织线索
 ANON_ZH = re.compile(r"^(不明|未知|身份不明|待查|不详|无|—|-|－)")
@@ -422,6 +449,29 @@ def judge(rec, min_deaths=0):
     # 早前版本在这里要求必须命中 SRC_ATTACK，于是
     # 「Police officer was killed after being targeted by unidentified assailants」
     # 这类标准恐袭全被挡在门外（2026-07 真值集 44 条）。
+    # ---- 反恐战果闸门（X2）----
+    # 「安全部队击毙/抓获 N 名恐怖分子」是反恐行动，不是恐怖袭击。
+    # 本库口径：计入的是「非国家方袭击政府/军警/平民」；政府方主动出击
+    # 击毙武装分子的，保留作对照、不计入统计。
+    #
+    # 为什么单独设闸门：GOV_AGGRESSIVE / SRC_GOV_OP 这两个正则早就定义了，
+    # 但只在个别分支里作辅助判断，没当成否决条件。于是
+    # 「Benin army kills six militants」直接落到 P1「明确非国家施害者」→ 计入。
+    # 实测 2026-07：527 条计入里 148 条是这类，占 28%。
+    #
+    # 顺序放在最前：这是主语方向的判断（谁打的谁），比后面的受害者词判断更基础。
+    # GOV_AGGRESSIVE 要求「政府方名词 + 主动击杀动词」，不会误伤
+    # 「Police officer was killed」（被动语态）这类真恐袭。
+    if GOV_AGGRESSIVE.search(txt) or SRC_GOV_OP.search(txt):
+        # 中文语境下再确认一次：如果句子在讲「我方被袭」，
+        # 那里的「击毙」是反击结果，不是反恐行动，不能整条排除。
+        if (ZH_VICTIM_CTX.search(txt)
+                and not re.search(r"(?:清剿|围剿|收复|夺回)", txt)):
+            pass          # 放行，交给后面的正面判据
+        else:
+            return ("保留", "X2",
+                    "安全部队击毙/抓获/清剿（反恐行动，不计入恐袭统计）")
+
     if txt_victim:
         if ("criminal" in kinds or CRIMINAL.search(txt) or CRIMINAL_ZH.search(txt)):
             return "不计入", "N2", "犯罪/惯匪作案（政府方虽为受害方），非恐怖主义"
