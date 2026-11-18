@@ -276,6 +276,134 @@ def pick(urls, office, headline, evd=None):
     return url, note
 
 
+NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+             "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11,
+             "twelve": 12, "thirteen": 13, "fourteen": 14, "fifteen": 15,
+             "sixteen": 16, "seventeen": 17, "eighteen": 18, "nineteen": 19,
+             "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+             "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+             "hundred": 100, "dozens": 12, "scores": 20}
+
+
+def _deaths_in_text(text, deaths):
+    """看文本里出现的伤亡数字是否与事件的死亡数接近。
+
+    返回 (是否对上, 文本里看到的数字列表)。
+    没看到任何数字时返回 (None, [])，表示「无法判定」，不当作不命中。
+    """
+    try:
+        d = int(str(deaths).strip())
+    except Exception:  # noqa: BLE001
+        return None, []
+    if d <= 0:
+        return None, []
+    t = str(text or "").lower()
+    nums = []
+    for m in re.finditer(r"\b(\d{1,5})\b", t):
+        v = int(m.group(1))
+        if 0 < v < 100000:
+            nums.append(v)
+    for w, v in NUM_WORDS.items():
+        if re.search(r"\b%s\b" % w, t):
+            nums.append(v)
+    # 去掉明显不是死亡数的（年份、月份、日期里的数字）
+    nums = [v for v in nums if not (1900 <= v <= 2100)]
+    if not nums:
+        return None, []
+    # 死亡数容差：±50%，且允许「至少 N」「超过 N」这类表述
+    lo, hi = max(1, int(d * 0.5)), int(d * 1.5) + 1
+    ok = any(lo <= v <= hi for v in nums)
+    return ok, nums[:8]
+
+
+def pick_structured(urls, rec, evd=None):
+    """给「长叙述体」记录的挑选器：按地名/国家命中打分，并标注置信度。
+
+    为什么需要第二个挑选器
+    ----------------------
+    pick() 是给「有明确标题」的场景设计的：要求标题命中 3–4 个长实词。
+    但 ACLED 的 summary 是整段叙述：
+       「On 8 August 2025, government security forces (SNA) and AUSSOM UPDF
+         launched a heavy coordinated operation in ...」
+    新闻标题不可能复现这些词，实测 20 条只有 1 条能过 pick()。
+
+    这类记录的检索式是结构化造出来的（国家 + 地名 + 月 年），
+    召回的结果天然已经限定了范围，所以改按「地名/国家是否命中」判定，
+    比按「词重叠」判定更贴合。
+
+    置信度分两档，写进备注，让人知道该不该直接引用：
+      强  = URL 有日期且差 ≤ 7 天，且命中 ≥ 2 个地名/国家词
+      中  = 只命中地名/国家词，或 URL 无日期
+    """
+    import unicodedata
+
+    def norm(t):
+        t = unicodedata.normalize("NFKD", str(t or "").lower())
+        return "".join(c for c in t if not unicodedata.combining(c))
+
+    # 地名/国家实词（≥4 字母，去通用词）
+    geo_raw = " ".join([str(rec.get("country") or ""),
+                        str(rec.get("place") or ""),
+                        str(rec.get("地区") or "")])
+    GENERIC = {"province", "district", "region", "state", "county", "city",
+               "north", "south", "east", "west", "central", "area", "town",
+               "village", "near", "the", "and", "lower", "upper", "greater"}
+    geo = [w for w in re.findall(r"[a-z]{4,}", norm(geo_raw)) if w not in GENERIC]
+    geo = list(dict.fromkeys(geo))[:8]
+    if not geo:
+        return None, "记录里没有可用的地名，无法判定"
+
+    scored = []
+    for url, title in urls:
+        if BLOCK.search(url) or AGGREGATE.search(url) or BAD_URL_WORD.search(url):
+            continue
+        hay = norm(url) + " " + norm(title)
+        hit = [w for w in geo if w in hay]
+        if not hit:
+            continue
+
+        ud = url_date(url)
+        if ud and evd:
+            gap = _days_diff(ud, evd)
+            if gap > 7:
+                continue
+        else:
+            gap = None
+
+        # ③ 死亡数校验 —— 最强的一条判据。
+        # 同一起事件，两个来源报的死亡数应该接近。实测：
+        #   事件「苏丹 死40」-> thehindu「killing 40」命中
+        #   事件「布基纳法索 死40」-> voanews「kills four」不命中（4 ≠ 40）
+        # 不加这条，上面两条会被同样处理，而后者是错链接。
+        num_ok, num_seen = _deaths_in_text(url + " " + (title or ""), rec.get("deaths"))
+        if num_ok is False:
+            continue
+
+        # 分档：数字对上才算强，只有地名只能算中
+        strong = bool(num_ok) and gap is not None and gap <= 7
+        score = (len(hit) * 3 + (12 if num_ok else 0) +
+                 (6 if strong else 0) + (2 if NEWS.search(url) else 0))
+        if url in USED_URLS:
+            continue
+        scored.append((score, url, title, hit, gap, strong, num_ok, num_seen))
+
+    if not scored:
+        return None, "地名/国家一个都没命中（宁缺毋滥）"
+    scored.sort(key=lambda x: -x[0])
+    score, url, title, hit, gap, strong, num_ok, num_seen = scored[0]
+    if strong:
+        conf = "强"
+    elif num_ok:
+        conf = "中"
+    else:
+        conf = "弱"
+    note = "置信度%s 地名%d个(%s)%s %s" % (
+        conf, len(hit), ",".join(hit[:4]),
+        (" 日期差%d天" % gap) if gap is not None else " URL无日期",
+        (" 死亡数对上了" if num_ok else (" 死亡数未对上(见%s)" % num_seen if num_seen else " 标题未见死亡数")))
+    return url, note
+
+
 def read_rows(path):
     if path.lower().endswith(".json") and not path.lower().endswith(".jsonl"):
         data = json.load(io.open(path, encoding="utf-8"))
@@ -357,9 +485,18 @@ def build_query(rec):
     # 标题碎片化时换成「国家 + 地点 + 月份 + 伤亡」构造查询。
     # 实测：UCDP 的 headline 经常只有 "A soldier" / "#BreakingNews" / "Two people"，
     # 这种标题搜不出任何东西（188 条只补到 8 条）。改用结构化特征更有效。
+    # ACLED 的 summary 不是标题，是整段叙述：
+    #   「On 8 August 2025, government security forces (SNA) and AUSSOM UPDF
+    #     launched a heavy coordinated operation in ...」
+    # 整段丢给检索后端召回极差（实测 12 条只成 1 条）。
+    # 识别这种「日期开头的叙述体」，改走结构化检索式：国家 + 地名 + 月 年。
+    acled_style = bool(re.match(
+        r"(?i)^(?:on|around|at|during|in)\s+(?:\d{1,2}\s+)?\w*\s*\d{4}", hl))
+
     frag = (len(hl.strip()) < 18
             or not re.search(r"[A-Za-z一-龥]{4,}\s+\S", hl)
-            or hl.strip().startswith("#"))
+            or hl.strip().startswith("#")
+            or acled_style)
     if frag:
         parts = []
         cty = str(rec.get("国家") or rec.get("country") or "").strip()
@@ -372,6 +509,15 @@ def build_query(rec):
             parts.append(plc)
         mm = str(rec.get("月份") or "").strip()
         yy = str(rec.get("年份") or "").strip()
+        # ACLED 的记录没有「月份/年份」列，日期在 date 字段（2025-08-06）。
+        # 不补这一步，结构化检索式会退化成「国家 地点 attack killed」，
+        # 查到的是最新新闻而不是目标月份的旧文。
+        if not mm or not yy:
+            _d = str(rec.get("date") or rec.get("日期") or "")[:10]
+            _m = re.match(r"(\d{4})-(\d{2})", _d)
+            if _m:
+                yy = yy or _m.group(1)
+                mm = mm or str(int(_m.group(2)))
         MON = {"1": "January", "2": "February", "3": "March", "4": "April",
                "5": "May", "6": "June", "7": "July", "8": "August",
                "9": "September", "10": "October", "11": "November", "12": "December"}
@@ -512,17 +658,33 @@ def main():
         q = build_query(r)
         raw = run_search(a.search_cmd, q, a.timeout)
         res = extract_results(raw)
-        url, note = pick(res, r.get("source_office"),
-                         r.get("source_headline") or r.get("事件摘要"),
-                         event_date(r))
+        # 长叙述体（ACLED 那种整段 notes）走地名匹配，标题体走词重叠匹配
+        _hl = (r.get("source_headline") or r.get("事件摘要")
+               or r.get("summary") or "")
+        _is_narr = bool(re.match(
+            r"(?i)^(?:on|around|at|during|in)\s+(?:\d{1,2}\s+)?\w*\s*\d{4}",
+            str(_hl)))
+        if _is_narr:
+            url, note = pick_structured(res, r, event_date(r))
+        else:
+            url, note = pick(res, r.get("source_office"),
+                             r.get("source_headline") or r.get("事件摘要"),
+                             event_date(r))
         if url:
             USED_URLS.add(url)
         if url:
             if str(a.out or "").lower().endswith((".xlsx", ".xlsm")):
                 r[a.fill or "信息来源URL"] = url
+                r["备注"] = (str(r.get("备注") or "") + " ｜[链接判据]" + note).strip()
             else:
                 r["url"] = url
                 r[a.fill or "信息来源URL"] = url
+                # 判据必须一起留下来。只给链接不给判据，
+                # 下游没法分辨「死亡数与标题都对上」和「只撞了个地名」，
+                # 台账上看起来一样可信 —— 这是最危险的一种假可信。
+                r["source_note"] = note
+                r["link_confidence"] = ("强" if "置信度强" in note else
+                                        "中" if "置信度中" in note else "弱")
             filled += 1
             mark = "✓"
         else:
