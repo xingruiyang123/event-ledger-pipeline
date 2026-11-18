@@ -93,6 +93,19 @@ NEWS = re.compile(
     r"bangkokpost|nationthailand)")
 
 
+def first_seg(text):
+    """取摘要第一段。ACLED 的 summary 常把多条不同新闻用分号拼在一起：
+        「Gunmen kill two policemen in Imo;Suspected separatists kill two officers in...」
+    这是**两起事件**。整段拿去做检索式和标题匹配，会匹配到另一条新闻。
+    实测台账里 5% 的条目有这个问题（122/2568），但一旦命中就是错链接。
+    """
+    t = str(text or "")
+    for sep in (";", "｜", " | "):
+        if sep in t:
+            t = t.split(sep)[0]
+    return t.strip()
+
+
 # 信源表：域名 -> 机构名。补链时把每条链接归属到机构，
 # 这样「补到链接」和「信源表覆盖了多少家」一次算完，不必分两步。
 REG_BY_DOM = {}
@@ -960,8 +973,8 @@ def main():
         raw = run_search(a.search_cmd, q, a.timeout)
         res = extract_results(raw)
         # 长叙述体（ACLED 那种整段 notes）走地名匹配，标题体走词重叠匹配
-        _hl = (r.get("source_headline") or r.get("事件摘要")
-               or r.get("summary") or "")
+        _hl = first_seg(r.get("source_headline") or r.get("事件摘要")
+                        or r.get("summary") or "")
         _is_narr = bool(re.match(
             r"(?i)^(?:on|around|at|during|in)\s+(?:\d{1,2}\s+)?\w*\s*\d{4}",
             str(_hl)))
@@ -969,7 +982,7 @@ def main():
             url, note = pick_structured(res, r, event_date(r))
         else:
             url, note = pick(res, r.get("source_office"),
-                             r.get("source_headline") or r.get("事件摘要"),
+                             first_seg(r.get("source_headline") or r.get("事件摘要")),
                              event_date(r),
                              r.get("deaths") if r.get("deaths") not in (None, "", 0)
                              else r.get("死亡人数"))
