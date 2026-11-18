@@ -628,9 +628,13 @@ def main():
         vout = os.path.join(od, "02_判定_已核验.json")
         vargs = [os.path.join(HERE, "verify_urls.py"),
                  "--in", judged, "--out", vout,
-                 "--fetch-cmd", a.fetch_cmd]
+                 "--fetch-cmd", a.fetch_cmd,
+                 # 必须给预算：不给自己跑到天荒地老，run_step 默认 600 秒会超时
+                 # 把整步 kill 掉，输出文件都不生成 —— 实测 34 条 × 20 秒 = 11 分钟
+                 # 就超了，表现为「▶ 正文核验」打印了但结果全丢。
+                 "--budget-seconds", "540"]
         run_step("正文核验（抓页面确认链接是否对应用起事件）",
-                 vargs, expect=0, allow_fail=True)
+                 vargs, expect=0, allow_fail=True, timeout=660)
         if os.path.isfile(vout):
             judged = vout
 
