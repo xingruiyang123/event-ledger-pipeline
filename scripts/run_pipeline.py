@@ -247,9 +247,12 @@ def write_coverage_note(path, month, contributions, judged, ledger_rows):
             lines.append("> 这类分布通常反映数据源的地域偏向（ACLED 在俄乌、中东极密集），")
             lines.append("> **不能当全球恐袭分布用**。")
     lines.append("")
-    lines.append("> 若「非致命」与「未遂」两条接近 0，说明这一版**几乎只覆盖了致命事件**，")
-    lines.append("> 与口径要求的「未遂照常计入」有明显差距。补法是加 --registry 走逐家遍历，")
-    lines.append("> 或加 --search-cmd 开未遂专项通道。")
+    lines.append("> 「非致命」与「未遂」是两类不同的缺口，要分开看：")
+    lines.append("> 非致命（死亡=0）靠 ACLED 就能补上，它有零死亡事件。")
+    lines.append("> 未遂/被挫败的图谋两个权威库都不收，只能靠 --nonlethal 定向检索。")
+    lines.append("> **不要用 --registry 逐家遍历补这两类** —— 实测 113 家跑完 93% 无产出，")
+    lines.append("> 原因是 site: 让检索按「该站最新」排序、目标月旧文被挤掉。")
+    lines.append("> 给已有事件补链接用 --search-cmd（走 enrich_urls.py），那条路实测有效。")
     lines.append("")
     d = os.path.dirname(path)
     if d and not os.path.isdir(d):
@@ -276,6 +279,10 @@ def main():
                     choices=["news", "structured", "mixed"])
     ap.add_argument("--registry", default=None,
                     help="信源表 xlsx。给了就并行走「逐家遍历」，补 UCDP 收不到的非致命/未遂事件")
+    ap.add_argument("--registry-crawl", action="store_true",
+                    help="额外跑「逐家 site: 遍历」。默认关 —— 实测 113 家跑完 93%% 无产出、"
+                         "0 条有效增量。按事件查请用 --search-cmd（走 enrich_urls）。"
+                         "只有想单独看某家媒体当月发了什么时才开")
     ap.add_argument("--registry-limit", type=int, default=0,
                     help="逐家遍历只跑前 N 家（0=全部）。先小样本试时用")
     ap.add_argument("--audit", action="store_true", default=True,
@@ -346,7 +353,7 @@ def main():
             results.append(("采集(UCDP)", ok, out))
         # 采集失败必须立即停：否则 0 条候选会一路空转到底，
         # 最后只报「找不到判定结果」，让人以为是自己少跑了某步。
-        if not ok and not a.registry:
+        if not ok and not (a.registry and a.registry_crawl) and not a.acled and not a.acled_env:
             print("")
             print("  采集失败，流水线终止。上面的诊断已说明原因。")
             print("  全链路结果：")
@@ -394,7 +401,13 @@ def main():
         elif os.path.isfile(cand):
             parts.append(cand)
 
-        if a.registry:
+        # 逐家 site: 遍历：**默认不跑**。
+        # 实测 113 家 P1 全跑完（1.4 分钟）：93% 显示「已检索·无事件」，
+        # 候选 11 条里 0 条是有效恐袭增量。原因不是信源表没用，是 site: 让
+        # 后端按「该站最新」排序、目标月的旧文被挤掉（正样本验证过）。
+        # 要按事件查请用 enrich_urls.py——那才是有效路径。
+        # 这里保留这个入口只是给「我就想看看某家媒体这个月发了什么」的场景用。
+        if a.registry and a.registry_crawl:
             if not os.path.isfile(a.registry):
                 print("\n  ✗ 信源表不存在：%s" % a.registry)
                 return 1
@@ -697,11 +710,17 @@ def main():
                              "country_dist": country_dist,
                              "verify": verify_stat}, nled)
         print("\n  覆盖边界声明 → %s" % cn)
-        if zero_death + attempted <= 2 and nled > 20:
+        # 两类缺口分开告警：非致命看 ACLED，未遂看 --nonlethal，补法完全不同
+        if zero_death == 0 and nled > 20:
             print("")
-            print("  ⚠️  非致命 %d 条、未遂 %d 条 —— 几乎只覆盖了致命事件。" % (zero_death, attempted))
-            print("     口径要求「预谋被破获、未遂、零伤亡照常计入」，这一块明显不足。")
-            print("     补法：加 --registry 走逐家遍历，或加 --nonlethal --search-cmd 开专项通道。")
+            print("  ⚠️  非致命 0 条 —— ACLED 没接上或缺数据。")
+            print("     加 --acled-env <凭据文件> 让 ACLED 进来，它含大量零死亡事件。")
+        if attempted <= 2 and nled > 20:
+            print("")
+            print("  ⚠️  未遂/被挫败只有 %d 条。" % attempted)
+            print("     口径要求「预谋被破获、未遂照常计入」，这一类两个权威库都不收。")
+            print("     补法：--nonlethal --search-cmd ...（走 harvest_nonlethal.py）")
+            print("     不要用 --registry 逐家遍历 —— 实测 93% 无产出。")
 
     # ============ 阶段 5：三份报告 + PPT ============
     if a.stage in ("gate", "all") and os.path.isfile(ledger):
