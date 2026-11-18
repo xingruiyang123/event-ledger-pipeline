@@ -160,6 +160,15 @@ def url_date(url):
     m = re.search(r"/(20\d{2})[/\-_](\d{1,2})(?=[/\-_.]|$)", url)
     if m:
         return (int(m.group(1)), int(m.group(2)), 15)
+    # 英文月份缩写路径：/2025/Aug/202515/xxx（hiiraan、许多非洲/南亚站点用它）
+    # 不认这个格式，大量本可以评「强」的链接会被压成「中」——
+    # 实测 2025-08 那批 Somali 报道全是这个形态。
+    MON = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+           "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+    m = re.search(r"/(20\d{2})/(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+                  r"(?:[a-z]*)", url, re.I)
+    if m:
+        return (int(m.group(1)), MON[m.group(2).lower()], 15)
     return None
 
 
@@ -379,8 +388,11 @@ def pick_structured(urls, rec, evd=None):
         if num_ok is False:
             continue
 
-        # 分档：数字对上才算强，只有地名只能算中
-        strong = bool(num_ok) and gap is not None and gap <= 7
+        # 分档：死亡数对上 + 地名命中 >= 2 个 就算强，不要求 URL 里有日期。
+        # 早前版本要求「URL 有日期且差 <=7 天」才算强，结果大量新闻站 URL 不含日期，
+        # 明明死亡数和地名都对上了也被压成「中」—— 把真实质量低估了。
+        # 死亡数是最强指纹：别的事件不会凑巧也死 139 人。
+        strong = bool(num_ok) and len(hit) >= 2
         score = (len(hit) * 3 + (12 if num_ok else 0) +
                  (6 if strong else 0) + (2 if NEWS.search(url) else 0))
         if url in USED_URLS:
@@ -525,7 +537,22 @@ def build_query(rec):
             parts.append(MON[mm])
         if yy:
             parts.append(yy)
-        parts.append("attack killed")
+        # 死亡数必须进检索式 —— 这是唯一能确认「同一起事件」的强证据。
+        # A/B 实测（6 条高死亡 ACLED 事件，元宝 20 条/次）：
+        #   不带死亡数：「Ukraine Pokrovsk killed militants August 2025」
+        #                目标月 87 条，标题里数字对上的 0 条
+        #   带死亡数  ：「Ukraine Pokrovsk killed 151 militants August 2025」
+        #                目标月 78 条，数字对上的 14 条
+        # 召回条数略降，但「能确认是同一事件」的从 0 变成 14。
+        # 别的事件不会凑巧也死 151 人 —— 这个数就是指纹。
+        try:
+            _dd = int(str(rec.get("deaths") or rec.get("死亡人数") or "").strip())
+        except Exception:  # noqa: BLE001
+            _dd = 0
+        if _dd > 0:
+            parts.append("killed %d" % _dd)
+        else:
+            parts.append("attack killed")
         q2 = " ".join(parts)
         return q2
 
