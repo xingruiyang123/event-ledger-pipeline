@@ -713,6 +713,17 @@ def main():
         deduped.append(r)
     if len(deduped) != len(rows):
         print("去重：%d -> %d 条（同国+同日+同死亡数视为同一事件）" % (len(rows), len(deduped)))
+    # 去重后的条数要落盘：audit_funnel 做算术对账时必须用这个数当分母。
+    # 不落盘的话对账会拿原始条数去比四项合计，永远差一个「去重掉多少」，
+    # 表现为「对账失败：差 -178 条」这种假警报 —— 实测踩过。
+    try:
+        _meta = {"input": len(rows), "after_dedup": len(deduped),
+                 "deduped": len(rows) - len(deduped)}
+        if a.out:
+            with io.open(a.out + ".meta.json", "w", encoding="utf-8") as _mf:
+                json.dump(_meta, _mf, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        pass
     rows = deduped
 
     led, exc, man, keep = [], [], [], []   # keep=保留作对照（反恐行动/交战），不计入统计

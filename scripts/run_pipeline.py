@@ -690,9 +690,15 @@ def main():
             _pargs += ["--acled", _ac3[0]]
         if _uc3:
             _pargs += ["--ucdp", _uc3[0]]
-        if os.path.isfile(judged) and ("01a_ucdp" in judged or judged.endswith(".xlsx")):
+        # 条件只要 judged 存在，且至少给了一个源。
+        # 早前的条件写的是 judged 里含 "01a_ucdp" 或以 .xlsx 结尾 ——
+        # 而 judged 是 02_判定.json，两者都不满足，这步永远不跑。
+        # 表现为台账里「事件ID/坐标/原始来源」全为 0，端到端测试抓出来的。
+        if os.path.isfile(judged) and (_ac3 or _uc3):
             run_step("溯源嵌入（事件ID/坐标/原始来源）", _pargs,
                      expect=0, allow_fail=True)
+            if os.path.isfile(_prov_out):
+                judged = _prov_out
 
         run_step("生成 19 列台账", [os.path.join(HERE, "make_ledger.py"),
                                  "--template", "19列", "--rows", judged,

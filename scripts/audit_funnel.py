@@ -81,7 +81,22 @@ def main():
     exc = load(a.excluded)
     keep = load(a.keep)
 
-    base = a.dedup_to or len(cand)
+    # 去重后的条数优先从 judge 写的 sidecar 读。
+    # 拿原始条数当分母会永远差一个「去重掉多少」，表现为假的对账失败。
+    base = a.dedup_to
+    if not base:
+        _meta_p = os.path.join(os.path.dirname(os.path.abspath(a.ledger)),
+                               os.path.basename(a.ledger) + ".meta.json")
+        if os.path.isfile(_meta_p):
+            try:
+                _m = json.load(io.open(_meta_p, encoding="utf-8"))
+                base = int(_m.get("after_dedup") or 0)
+                print("  从 %s 读到去重后条数 %d"
+                      % (os.path.basename(_meta_p), base))
+            except Exception:  # noqa: BLE001
+                base = 0
+    if not base:
+        base = len(cand)
     total = len(led) + len(man) + len(exc) + len(keep)
 
     print("=" * 62)

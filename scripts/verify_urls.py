@@ -313,6 +313,9 @@ def main():
 
         if len(body) < 200:
             r["verify_result"] = "抓不到"
+            _old2 = str(r.get("备注") or "")
+            if "[未核验" not in _old2:
+                r["备注"] = (_old2 + " ｜ [未核验:反爬/付费墙]").strip()
             r["verify_note"] = "正文 %d 字符，太少" % len(body)
             stat["fetchfail"] += 1
             print("  [%d/%d] ✗抓不到 %s" % (n, len(todo), url[:60]), flush=True)
@@ -336,6 +339,14 @@ def main():
             stat["fail"] += 1
 
         r["verify_result"] = res
+        # 同时写进备注列。make_ledger 只取 19 列，不写备注的话
+        # 核验结论会在出表时被丢掉 —— 实测端到端跑完台账里「正文核验」为 0。
+        _tag = {"通过": "[正文核验✓]", "部分": "[正文核验~]",
+                "不通过": "[正文核验✗已剔除]"}.get(res, "")
+        if _tag:
+            _old = str(r.get("备注") or "")
+            if "[正文核验" not in _old:
+                r["备注"] = (_old + " ｜ " + _tag).strip()
         r["verify_note"] = "正文%d字 死亡数%s 地名命中%d(%s) 日期%s" % (
             len(body),
             {True: "对上", False: "未对上", None: "无死亡数"}[ok_d],
