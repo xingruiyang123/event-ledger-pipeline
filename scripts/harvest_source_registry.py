@@ -135,7 +135,7 @@ def month_terms(month):
 
 
 # ---------------------------------------------------------------- 信源表
-def load_registry(path, sheet=None):
+def load_registry(path, sheet=None, priority=None):
     """读信源表，返回 [{id,name,domain,type,country,lang,level}]。
 
     容忍列名差异：找含「域名」的列当主域名，找含「名称/机构」的列当名称。
@@ -187,7 +187,10 @@ def load_registry(path, sheet=None):
     i_type = find("机构类型", "类型", "type")
     i_cty = find("所在国", "国家", "country")
     i_lang = find("语种", "语言", "lang")
-    i_lvl = find("原等级", "等级", "level")
+    i_lvl = find("建议优先级", "优先级", "原等级", "等级", "level")
+    # 优先级与等级是两回事：信源表里「原等级」是 S/A/B（媒体影响力），
+    # 「建议优先级」是 P1/P2/P3（这一轮该先跑谁）。
+    # 取错列的话按 P1 筛会得到 0 家 —— 实测踩过一次。
     i_id = find("机构ID", "ID", "id")
 
     if i_dom is None:
@@ -221,6 +224,15 @@ def load_registry(path, sheet=None):
             continue
         seen.add(x["domain"])
         uniq.append(x)
+
+    # 按优先级筛选。名单 1446 家里 P1 只有 114 家、P3 有 1158 家，
+    # 全量跑一轮要两小时以上。先跑 P1 就能拿到有统计意义的覆盖率数字，
+    # 不必等全量跑完才知道这一路值不值得做。
+    if priority:
+        want = {p.strip().upper() for p in str(priority).split(",") if p.strip()}
+        before = len(uniq)
+        uniq = [x for x in uniq if (x.get("level") or "").strip().upper() in want]
+        print("  按优先级筛选 %s：%d -> %d 家" % (sorted(want), before, len(uniq)))
     return uniq
 
 
@@ -430,6 +442,106 @@ def extract_from_headline(title):
             break
 
     return {"deaths": deaths, "injured": injured, "act_type": act, "actor_a": actor}
+
+
+# 从标题里认国家。信源表候选的 country 字段原本留空（不能填媒体所在国：
+# Dawn 是巴基斯坦媒体，但它报的西岸定居者袭击会被错标成巴基斯坦）。
+# 但留空会让判定链和跨源核验都没法按国家匹配，等于这一路的数据进不了主流程。
+# 折中：从标题正文里认，认不出就留空，绝不拿媒体所在国顶替。
+COUNTRY_WORDS = {
+    "Afghanistan": ["afghanistan", "阿富汗", "kabul", "喀布尔"],
+    "Nigeria": ["nigeria", "尼日利亚", "abuja", "borno", "kaduna", "zamfara"],
+    "Pakistan": ["pakistan", "巴基斯坦", "peshawar", "karachi", "waziristan",
+                 "balochistan", "kp province", "islamabad"],
+    "Somalia": ["somalia", "索马里", "mogadishu", "摩加迪沙", "al-shabaab", "al shabaab"],
+    "Syria": ["syria", "叙利亚", "damascus", "大马士革", "idlib", "aleppo"],
+    "Iraq": ["iraq", "伊拉克", "baghdad", "巴格达", "mosul", "kirkuk"],
+    "Yemen": ["yemen", "也门", "sanaa", "aden", "houthi", "胡塞"],
+    "Sudan": ["sudan", "苏丹", "khartoum", "喀土穆", "darfur", "达尔富尔", "rsf"],
+    "South Sudan": ["south sudan", "南苏丹", "juba"],
+    "Mali": ["mali", "马里", "bamako", "timbuktu", "jnim"],
+    "Burkina Faso": ["burkina", "布基纳法索", "ouagadougou"],
+    "Niger": ["niger", "尼日尔", "niamey"],
+    "Chad": ["chad", "乍得", "ndjamena"],
+    "Cameroon": ["cameroon", "喀麦隆", "boko haram", "yaounde"],
+    "Democratic Republic of the Congo": ["congo", "刚果", "kinshasa", "goma",
+                                         "north kivu", "south kivu", "m23"],
+    "Mozambique": ["mozambique", "莫桑比克", "cabo delgado"],
+    "Ethiopia": ["ethiopia", "埃塞俄比亚", "addis ababa", "tigray", "amhara"],
+    "Kenya": ["kenya", "肯尼亚", "nairobi", "al-shabaab"],
+    "Libya": ["libya", "利比亚", "tripoli", "benghazi"],
+    "Egypt": ["egypt", "埃及", "cairo", "开罗", "sinai", "西奈"],
+    "Algeria": ["algeria", "阿尔及利亚", "algiers"],
+    "Morocco": ["morocco", "摩洛哥", "rabat"],
+    "Tunisia": ["tunisia", "突尼斯"],
+    "Israel": ["israel", "以色列", "jerusalem", "tel aviv", "idf"],
+    "Palestine": ["palestine", "palestinian", "巴勒斯坦", "gaza", "加沙",
+                  "west bank", "约旦河西岸", "hamas", "rafah", "khan younis"],
+    "Lebanon": ["lebanon", "黎巴嫩", "beirut", "贝鲁特", "hezbollah"],
+    "Jordan": ["jordan", "约旦", "amman"],
+    "Saudi Arabia": ["saudi", "沙特"],
+    "Turkey": ["turkey", "türkiye", "土耳其", "istanbul", "ankara"],
+    "Iran": ["iran", "伊朗", "tehran", "德黑兰"],
+    "Russia": ["russia", "俄罗斯", "moscow", "莫斯科", "dagestan"],
+    "Ukraine": ["ukraine", "乌克兰", "kyiv", "kharkiv", "odesa", "donetsk"],
+    "India": ["india", "印度", "kashmir", "克什米尔", "delhi", "mumbai",
+              "chhattisgarh", "manipur", "naxal"],
+    "Bangladesh": ["bangladesh", "孟加拉"],
+    "Sri Lanka": ["sri lanka", "斯里兰卡"],
+    "Nepal": ["nepal", "尼泊尔"],
+    "Myanmar": ["myanmar", "burma", "缅甸", "yangon", "仰光", "rakhine"],
+    "Thailand": ["thailand", "泰国", "bangkok"],
+    "Philippines": ["philippines", "菲律宾", "mindanao", "manila"],
+    "Indonesia": ["indonesia", "印度尼西亚", "jakarta", "papua"],
+    "Malaysia": ["malaysia", "马来西亚"],
+    "China": ["china", "中国", "xinjiang", "新疆"],
+    "Colombia": ["colombia", "哥伦比亚", "bogota", "eln", "farc"],
+    "Mexico": ["mexico", "墨西哥", "juarez", "sinaloa", "tijuana", "guerrero"],
+    "Brazil": ["brazil", "巴西", "rio de janeiro", "sao paulo"],
+    "Venezuela": ["venezuela", "委内瑞拉", "caracas"],
+    "Peru": ["peru", "秘鲁", "lima"],
+    "Ecuador": ["ecuador", "厄瓜多尔", "guayaquil", "quito"],
+    "Haiti": ["haiti", "海地", "port-au-prince", "太子港"],
+    "Honduras": ["honduras", "洪都拉斯"],
+    "Guatemala": ["guatemala", "危地马拉"],
+    "El Salvador": ["el salvador", "萨尔瓦多"],
+    "Chile": ["chile", "智利"],
+    "Argentina": ["argentina", "阿根廷"],
+    "United States": ["united states", "u.s.", "美国", "texas", "chicago"],
+    "United Kingdom": ["united kingdom", "britain", "英国", "london", "manchester"],
+    "France": ["france", "法国", "paris", "巴黎", "marseille"],
+    "Germany": ["germany", "德国", "berlin", "柏林"],
+    "Spain": ["spain", "西班牙", "madrid"],
+    "Italy": ["italy", "意大利", "rome"],
+    "Belgium": ["belgium", "比利时", "brussels"],
+    "Sweden": ["sweden", "瑞典", "stockholm"],
+    "Norway": ["norway", "挪威", "oslo"],
+    "Netherlands": ["netherlands", "荷兰", "amsterdam"],
+    "Australia": ["australia", "澳大利亚", "sydney", "melbourne"],
+    "Canada": ["canada", "加拿大", "toronto", "ottawa"],
+    "Kazakhstan": ["kazakhstan", "哈萨克斯坦"],
+    "Tajikistan": ["tajikistan", "塔吉克斯坦"],
+    "Uzbekistan": ["uzbekistan", "乌兹别克斯坦"],
+    "Azerbaijan": ["azerbaijan", "阿塞拜疆"],
+    "Georgia": ["georgia", "格鲁吉亚", "tbilisi"],
+}
+
+
+def guess_country(text):
+    """从标题/摘要里认国家。认不出返回空串 —— 不猜、不拿媒体所在国顶替。"""
+    t = " " + str(text or "").lower() + " "
+    best, best_n = "", 0
+    for cty, words in COUNTRY_WORDS.items():
+        n = 0
+        for w in words:
+            if len(w) <= 4:
+                if re.search(r"(?<![a-z])%s(?![a-z])" % re.escape(w), t):
+                    n += 1
+            elif w in t:
+                n += 1
+        if n > best_n:
+            best, best_n = cty, n
+    return best
 
 
 def in_month(date, ym):
@@ -662,6 +774,9 @@ def main():
                     help="抓单个 URL 的命令模板，{url} 为占位。例：curl -sL --max-time 20 {url}")
     ap.add_argument("--search-cmd", default=None,
                     help='检索命令模板，{q} 为占位。例：xxx search "{q}" --json')
+    ap.add_argument("--priority", default=None,
+                    help="只跑这些优先级的机构（逗号分隔，如 P1 或 P1,P2）。"
+                         "名单 1446 家里 P1 只有 114 家，先跑 P1 就能拿到覆盖率数字")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 家（0=全部）")
     ap.add_argument("--workers", type=int, default=6, help="并发数，默认 6")
     ap.add_argument("--delay", type=float, default=1.0, help="每家间隔秒，默认 1.0")
@@ -681,7 +796,7 @@ def main():
         return 1
 
     mt = month_terms(a.month)
-    srcs = load_registry(a.registry, a.sheet)
+    srcs = load_registry(a.registry, a.sheet, a.priority)
     print("信源表：%s" % a.registry)
     print("机构家数：%d（同域已合并）" % len(srcs))
     print("目标月份：%s" % a.month)
@@ -765,7 +880,8 @@ def main():
                 # 不能填信源机构所在国：Dawn 是巴基斯坦媒体，但它报的
                 # 西岸定居者袭击会被错标成「巴基斯坦」。国家归属要看正文，
                 # 这里留空、交给后续核验补。
-                "country": "",
+                # 用标题认国家；认不出留空，绝不填媒体所在国
+                "country": guess_country(it.get("title", "")),
                 "place": "",
                 "summary": it.get("title", "")[:300],
                 "deaths": _ex["deaths"],
