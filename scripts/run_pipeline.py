@@ -844,6 +844,18 @@ def main():
                 print("  C 档 %d 条（%.0f%%）精确率约 26-52%%，"
                       "逐条引用前需人工复核"
                       % (_tx.get("C", 0), 100.0 * _tx.get("C", 0) / _all))
+            # 候选集 vs 正式 GED 的质量差
+            # 实测：2025-08（正式 GED）A+B 52%；2026-07（候选集）A+B 23%
+            _asrc = (a.ucdp_candidate or a.ucdp or "").lower()
+            if "candidateged" in _asrc or "gedevent_v26" in _asrc:
+                print("")
+                print("  ⚠️  本次用的是 UCDP 月度候选集（机器抽取的原始事件）。")
+                print("      实测同一批事件，候选集跑出的 A+B 档占 23%，")
+                print("      正式 GED 跑出的是 52% —— 差在摘要质量：")
+                print("      正式版经 UCDP 人工核校，摘要带组织名，性质分能拿到；")
+                print("      候选集摘要多为标题片段，组织名常缺失。")
+                print("      建议：等待 1-2 个月 UCDP 发布正式 GED 后重跑一次，")
+                print("            同一批事件会升到 A/B 档，人工复核量减半。")
         except Exception as _e:  # noqa: BLE001
             print("  （性质分档统计跳过：%s）" % str(_e)[:60])
 
