@@ -1,20 +1,4 @@
-﻿# ============================================================
-# 采集调度入口（模板）
-#
-# 用法：复制到数据根目录，改下面 4 个路径变量，然后执行
-#   schtasks /Create /TN "EventLedger-Collect" ^
-#     /TR "powershell.exe -NoProfile -ExecutionPolicy Bypass -File <本文件路径>" ^
-#     /SC MINUTE /MO 30 /F
-#
-# 三个必须知道的编码坑（都实测踩过）：
-#  1. 文件必须存成 UTF-8 **with BOM**。PowerShell 5.1 靠 BOM 判断编码，
-#     没有 BOM 就按系统 ANSI(GBK) 读，脚本里的中文路径全部乱码。
-#  2. 变量名不能叫  —— PS 5.1 里  是自动变量，赋值会报
-#     "Cannot overwrite variable Args"，脚本 exit=1。
-#  3. 管道里的 Python 输出会被按 GBK 解码，中文变「淇℃簮涓昏〃」。
-#     必须设 [Console]::OutputEncoding，只加 BOM 不够。
-# ============================================================
-# 事件台账采集调度 —— 计划任务入口（PowerShell 版）
+﻿# 事件台账采集调度 —— 计划任务入口（PowerShell 版）
 #
 # 为什么不用 .cmd：实测 cmd 的 %date% 在中文系统返回「周四 2026/11/19」，
 # 用 %date:~5,2% 截取会得到「周四」而不是月份，导致 `logs\collect_周四` 这种
@@ -64,6 +48,26 @@ $cliArgs = @(
 
 & $py @cliArgs 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
 $rc = $LASTEXITCODE
+# ── 第二步：正文层 ──
+# 每轮限量抓 300 篇，避免一次拖太久。首轮积压 1 万条约 35 轮消化完，
+# 稳态后每轮只有几十条新增，几乎不耗时。
+#
+# 为什么与 feed 分两步：feed 是「这个源今天有什么」（分钟级），
+# 正文是「把候选文章存下来」（小时级）。节奏不同，分开便于分别限流，
+# 也便于单独看两层的成功率 —— 合并成一个数就判断不出问题在哪层。
+"---- 正文层 ----" | Out-File -FilePath $log -Append -Encoding utf8
+$artArgs = @(
+    "-W", "ignore", (Join-Path $pipe "scripts\fetch_articles.py"),
+    "--store", $root,
+    "--workers", "6",
+    "--timeout", "20",
+    "--proxy", "http://127.0.0.1:17890",
+    "--limit", "300"
+)
+& $py @artArgs 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
+$rcArt = $LASTEXITCODE
+if ($rc -eq 0) { $rc = $rcArt }
+
 
 "==== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 结束 exit=$rc ====" |
     Out-File -FilePath $log -Append -Encoding utf8
