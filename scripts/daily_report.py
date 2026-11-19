@@ -83,7 +83,14 @@ def main():
             if int(j.get("n_fetches") or 0) > 1
             and (j.get("last_n_new") or 0) >= (j.get("capacity") or 1) * 0.6]
 
-    n_new = sum(j.get("last_n_new") or 0 for j in ok)
+    # 增量必须区分「首轮基线」和「真实新增」。
+    # 首轮抓取时 n_new == capacity（全部条目都是新的），那不是增量，是基线。
+    # 混在一起算会得出「本轮新增 20 万篇」这种荒唐数字 —— 实测正是如此：
+    # 200 家跑第二轮只新增 837 篇，报告却写 205,978。
+    first = [j for j in ok if int(j.get("n_fetches") or 0) <= 1]
+    warm = [j for j in ok if int(j.get("n_fetches") or 0) > 1]
+    n_baseline = sum(j.get("last_n_new") or 0 for j in first)
+    n_new = sum(j.get("last_n_new") or 0 for j in warm)
     n_total_new = sum(j.get("n_new_total") or 0 for j in st)
     caps = sorted(j.get("capacity") or 0 for j in ok if j.get("capacity"))
     rates = sorted(j.get("rate") for j in ok if j.get("rate"))
@@ -122,7 +129,8 @@ def main():
             "dead": len(dead), "success_rate": round(rate_ok, 1),
         },
         "volume": {
-            "new_last_run": n_new, "new_cumulative": n_total_new,
+            "new_last_run": n_new, "baseline": n_baseline,
+            "new_cumulative": n_total_new,
             "median_capacity": caps[len(caps) // 2] if caps else 0,
             "median_daily_rate": round(rates[len(rates) // 2], 1) if rates else 0,
         },
@@ -171,8 +179,9 @@ def main():
         n_parse, "" if n_parse == 0 else "   ← 这些入口 URL 是探测假阳性，需重新探测"))
     L.append("")
     L.append("  ── 三、增量层：有新的吗 ──")
-    L.append("    本轮新增        %d 篇" % n_new)
-    L.append("    累计新增        %d 篇" % n_total_new)
+    L.append("    本轮新增        %d 篇（%d 家已跑过两轮以上）" % (n_new, len(warm)))
+    L.append("    首轮基线        %d 条（%d 家只跑过一次，不算增量）" % (n_baseline, len(first)))
+    L.append("    累计入库        %d 条" % n_total_new)
     L.append("    订阅源容量中位   %d 条" % rep["volume"]["median_capacity"])
     L.append("    日更新量中位     %.1f 条" % rep["volume"]["median_daily_rate"])
     L.append("")
