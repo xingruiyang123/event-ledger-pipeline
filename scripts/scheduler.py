@@ -344,8 +344,13 @@ def _session():
         s.mount("http://", ad)
         s.mount("https://", ad)
         s.headers.update({"User-Agent": UA,
-                          "Accept": "application/rss+xml, application/xml, "
-                                    "text/xml, application/atom+xml, */*;q=0.8",
+                          # Accept 要同时容得下 feed 和 HTML 页。
+                          # 之前只写 application/rss+xml，抓正文时 africanews.com
+                          # 直接返 406 Not Acceptable —— 它要求 text/html。
+                          "Accept": "text/html,application/xhtml+xml,"
+                                    "application/xml;q=0.9,"
+                                    "application/rss+xml;q=0.9,"
+                                    "application/atom+xml;q=0.9,*/*;q=0.8",
                           "Accept-Language": "en,zh;q=0.9,*;q=0.8"})
         _SESSION = s
     return _SESSION

@@ -89,6 +89,28 @@ KW = {
 }
 
 
+# 明显不是文章的路径段。实测 sitemap 的 URL slug 匹配会捞进大量非新闻：
+#   /people/matt-killingsworth  人名里带 killings
+#   /podcast/terrorist-s-wife   播客
+#   /video/president-xi-...     视频
+#   /tag/attack-drones          标签页
+# 这些页面本身能打开（200、十几万字节），但里面没有事件，抓下来纯浪费。
+NOT_ARTICLE = re.compile(
+    r"/(people|person|author|authors|staff|profile|profiles|bio|"
+    r"tag|tags|category|categories|topic|topics|section|sections|"
+    r"podcast|podcasts|video|videos|photo|photos|gallery|galleries|"
+    r"about|contact|subscribe|subscription|login|signin|register|"
+    r"privacy|terms|faq|help|advertise|careers|jobs|team|"
+    r"search|archive|archives|index|feed|rss|sitemap)(/|$|\?)", re.I)
+
+# 像文章的路径特征。命中任一条加分。
+ARTICLE_HINT = re.compile(
+    r"(/\d{4}/\d{1,2}(/|$)|"
+    r"/(article|articles|news|story|stories|post|posts|report|reports|"
+    r"world|politics|security|conflict|crime|investigation)/|"
+    r"\.(html?|shtml|php)(\?|$))", re.I)
+
+
 def url_slug(url):
     """把 URL 路径转成可比对的词串。
 
@@ -113,6 +135,42 @@ def looks_like_attack(title, summary="", url=""):
         s = url_slug(url)
         hits = [k for k, p in KW.items() if p.search(s)]
     return hits
+
+
+def is_probably_article(url, title=""):
+    """判断一个 URL 是不是文章页。
+
+    只在「没有标题」（sitemap 来源）时严格判断 ——
+    有标题的条目说明 feed 明确给了文章标题，不用再猜。
+
+    实测的坏 URL 类型（都真实抓到过）：
+      http://default/en/faqs/...      主机名解析错了，sitemap 里常见
+      .../mortar-board.pdf            sitemap 收录了 PDF 和图片
+      .../people/matt-killingsworth   人名里带 killings
+    """
+    if (title or "").strip():
+        return True
+    u = str(url or "")
+    if not u.startswith("http"):
+        return False
+    # 主机名异常：default / localhost / 单段名，是 sitemap 生成错误
+    try:
+        host = u.split("/")[2].lower()
+    except Exception:  # noqa: BLE001
+        return False
+    if host in ("default", "localhost", "example.com") or "." not in host:
+        return False
+    # 非 HTML 资源
+    if re.search(r"\.(pdf|jpe?g|png|gif|webp|svg|zip|rar|mp[34]|avi|mov|"
+                 r"docx?|xlsx?|pptx?|csv|json|xml)(\?|$)", u, re.I):
+        return False
+    if NOT_ARTICLE.search(u):
+        return False
+    # 路径太短通常是栏目页（如 /world、/news）
+    path = re.sub(r"^https?://[^/]+", "", u).split("?")[0]
+    if len(path.strip("/")) < 8:
+        return False
+    return True
 
 
 def gather_candidates(store, extractions=None):
@@ -148,6 +206,10 @@ def gather_candidates(store, extractions=None):
             seen.add(link)
             langs = looks_like_attack(e.get("title"), e.get("summary"), link)
             if not langs:
+                continue
+            # sitemap 来源没有标题，URL 里的词容易误中（/people/matt-killingsworth），
+            # 加一道「是不是文章页」的判定，把人物页、播客、视频挡在外面。
+            if not is_probably_article(link, e.get("title")):
                 continue
             out.append({
                 "url": link,
@@ -201,9 +263,6 @@ def main():
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
         print("    候选清单 → %s" % a.candidates_out)
 
-    if a.limit:
-        cands = cands[:a.limit]
-
     # 已经抓过正文的跳过（raw_store 里 kind=article 的）
     import glob
     have = set()
@@ -215,7 +274,17 @@ def main():
         if m.get("kind") == "article":
             have.add(m.get("url"))
     todo = [c for c in cands if c["url"] not in have]
-    print("    已抓过 %d 篇，本次要抓 %d 篇" % (len(cands) - len(todo), len(todo)))
+    print("    已抓过 %d 篇，待抓 %d 篇" % (len(cands) - len(todo), len(todo)))
+
+    # 限流必须在去重之后。
+    # 原来写成先 cands[:limit] 再去重，后果是每轮只取候选清单的前 300 条，
+    # 减去已抓的之后只剩个位数，后面的 1 万条永远轮不到 ——
+    # 手工跑 --limit 40 时因为候选多没暴露，定时任务跑几轮才现形：
+    # 日志里「候选 10556 / 已抓 293 / 本次要抓 7」，正是这个 bug。
+    if a.limit and len(todo) > a.limit:
+        print("    本轮限量 %d 篇（待抓 %d 篇，剩余下轮继续）"
+              % (a.limit, len(todo)))
+        todo = todo[:a.limit]
     print("")
 
     if not todo:

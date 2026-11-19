@@ -31,11 +31,31 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/122.0 Safari/537.36")
 
 # 常见入口路径，按命中概率排序（多数站点至少有一个）
+# 常见入口路径。顺序即优先级：RSS 在前，因为 RSS 给的是「最近文章+标题」，
+# sitemap 给的是「全站 URL 清单」且多数没有标题。
+#
+# 为什么列这么长：实测 794 家无入口的源里，按原来 4 条路径只探到 28%
+# （49 家里 14 个）。大媒体的 RSS 路径不统一 —— 有的用 /rss.xml，
+# 有的用 /feeds/all.atom.xml，有的把 RSS 藏在 /rss/ 目录下。
+# 多试几条的成本是一次 HTTP 请求，远低于漏掉一个 P1 通讯社的代价。
 PATHS = [
-    "/sitemap.xml",
     "/rss",
     "/feed",
+    "/rss.xml",
+    "/feed.xml",
+    "/atom.xml",
+    "/index.xml",
+    "/rss/",
+    "/feeds/",
+    "/feeds/all.atom.xml",
+    "/rss/all.rss",
+    "/news/rss",
+    "/rss/all",
+    "/.rss",
+    "/sitemap.xml",
     "/sitemap_index.xml",
+    "/sitemap-index.xml",
+    "/news-sitemap.xml",
 ]
 
 
