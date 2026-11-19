@@ -419,8 +419,17 @@ def parse_feed(raw):
     out = []
 
     if "<urlset" in low or "<sitemapindex" in low:
-        # sitemap：条目是 <url><loc>...</loc><lastmod>...</lastmod>
-        for m in re.finditer(r"<url>(.*?)</url>", txt, re.S | re.I):
+        # 两种 sitemap 要分开：
+        #   <urlset>      条目是 <url><loc>，loc 就是文章
+        #   <sitemapindex> 条目是 <sitemap><loc>，loc 是**子 sitemap**，不是文章
+        #
+        # 原来只匹配 <url>，于是 sitemapindex 解析出 0 条，被记成「解析无条目」。
+        # 实测 66 家失败里 47 家是这个原因（aninews、asiaone、cgtn、
+        # business-standard、ctc.westpoint… 全是大站的 sitemapindex）。
+        # 这里把两种都解析出来，由调用方判断要不要展开子 sitemap。
+        is_index = "<sitemapindex" in low
+        tag = "sitemap" if is_index else "url"
+        for m in re.finditer(r"<%s>(.*?)</%s>" % (tag, tag), txt, re.S | re.I):
             blk = m.group(1)
             loc = re.search(r"<loc>(.*?)</loc>", blk, re.S | re.I)
             lm = re.search(r"<lastmod>(.*?)</lastmod>", blk, re.S | re.I)
@@ -429,7 +438,8 @@ def parse_feed(raw):
             link = _text(loc.group(1))
             out.append({"id": link, "title": "", "link": link,
                         "published": _text(lm.group(1)) if lm else "",
-                        "summary": ""})
+                        "summary": "",
+                        "sitemap_index": is_index})
         return out
 
     # RSS / Atom
@@ -485,6 +495,37 @@ def process_source(rec, state_dir, store, args):
                 "n_entries": 0, "note": "HTTP %s" % code}
 
     entries = parse_feed(body)
+
+    # sitemapindex 要给一层展开：它列的是子 sitemap，不是文章。
+    # 优先挑 news 类子 sitemap —— Google News sitemap 只含最近两天，
+    # 正是「这个源今天写了什么」要的东西；全站 sitemap 动辄几万条，
+    # 拿来当增量源既慢又不准。
+    if entries and entries[0].get("sitemap_index"):
+        subs = [e["link"] for e in entries if e.get("link")]
+        pick = None
+        for kw in ("news", "post", "article"):
+            hit = [u for u in subs if kw in u.lower()]
+            if hit:
+                pick = hit[0]
+                break
+        if not pick and subs:
+            # 没有 news 类就取最后一个：多数站把最新的放在末尾
+            pick = subs[-1]
+        if pick:
+            c2, b2, e2, f2 = http_get(pick, args.timeout, retries=1)
+            if c2 == 200 and b2:
+                if store is not None:
+                    try:
+                        store.put(pick, b2, c2, e2, f2, fetched_at=t0,
+                                  extra={"kind": "feed", "domain": dom,
+                                         "sub_of": feed_url})
+                    except Exception:  # noqa: BLE001
+                        pass
+                sub_entries = parse_feed(b2)
+                if sub_entries:
+                    entries = sub_entries
+                    feed_url = pick
+
     if not entries:
         st.on_failure("解析无条目", t0)
         st.save(sp)
