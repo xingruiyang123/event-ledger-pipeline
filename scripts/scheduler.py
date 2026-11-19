@@ -99,7 +99,8 @@ sys.path.insert(0, HERE)
 ALPHA = 0.5              # 安全系数：只用掉容量寿命的一半
 T_MIN_H = 1.0            # 最短间隔（小时）；再短没有收益，只是增加请求
 T_MAX_H = 72.0           # 最长间隔（小时）；再长对低频源也没意义
-T_UNKNOWN_H = 6.0        # rate 未知时的保守间隔
+T_UNKNOWN_H = 6.0        # 从未抓过时的保守间隔
+T_PROBE_H = 1.0          # 已有基线、但还没测出更新速度时的间隔
 CAPACITY_WARN = 0.6      # 单次新增占容量超过此比例 → 容量告警
 FAIL_BREAK = 3           # 连续失败几次触发熔断
 BREAK_H = 6.0            # 熔断时长
@@ -171,11 +172,26 @@ class State:
 
     # ---- 调度决策 ----
     def safe_interval_h(self):
-        """容量寿命的一半。这是整个调度器的核心公式。"""
+        """容量寿命的一半。这是整个调度器的核心公式。
+
+        rate 的三种状态要分开处理，否则会互相等死：
+
+          从未抓过（rate=0, 无基线）  → T_UNKNOWN_H（6h，先建立基线）
+          有基线但还没测出 rate      → T_PROBE_H（1h，尽快抓第二轮把 rate 测出来）
+          已有 rate                  → C/R×α
+
+        为什么要有中间那档：rate 靠「两次成功抓取之间的增量÷间隔」算出来，
+        一次抓取永远算不出速度。若基线之后仍按 6 小时排，第二轮要等 6 小时，
+        这 6 小时里所有源都停在「速度未知」上，自适应频率等于没启用。
+        实测就卡在这：683 家全部建成基线，算得出 rate 的 0 家。
+        """
         cap = self.d.get("capacity") or 0
         rate = self.d.get("rate") or 0
-        if cap <= 0 or rate <= 0:
+        if cap <= 0:
             return T_UNKNOWN_H
+        if rate <= 0:
+            # 有基线没速度 —— 尽快抓一轮把速度测出来，别用 6 小时拖
+            return T_PROBE_H
         life_h = cap / (rate / 24.0)      # rate 是「每天」，换成每小时
         t = life_h * ALPHA
         return max(T_MIN_H, min(T_MAX_H, t))
