@@ -1317,6 +1317,82 @@ kids.kiddle.co/Est_Region_%28Burkina_Faso%29
 地理（worldatlas / mapsofworld / geonames）、点评（tripadvisor）、
 社交与聚合（facebook / twitter / youtube / friendica / mastodon / nitter）。
 
+#### 自采那一路：接上了，但价值比预期低
+
+UCDP 收录有上限，媒体独家事件不在其中。所以做了一路自采：
+按「国家 × 事件类型」组合检索新闻，产出候选，走同一条判定链。
+
+**实测信噪比约 1:3，最后改成「只出线索、不并台账」。**
+
+#### 2000 条 UCDP → 500 条检索结果 → 25 条候选 → 7 条有效
+
+2026-07 六国自采（217 条查询）的完整漏斗：
+
+| 阶段 | 数量 |
+|---|---|
+| 检索返回 | 500+ |
+| 抽取成候选 | 217 |
+| 通过去噪与去重 | 25 |
+| **人工核对后有效** | **约 7** |
+
+被滤掉的噪声，按类型：
+
+| 类型 | 例 |
+|---|---|
+| 月度汇总 | `July Was Pakistan's Deadliest Month With Over 600 Killed` |
+| 事故 | `Exploding tank truck` / `fireworks workshop explosion` / 煤矿爆炸 |
+| 反恐战果 | `army kills 32 militants in counterterrorism operations` |
+| 交战合计 | `kill 42 in four days` / `between July 15 and 24` |
+| 历史回顾 | 百度百科「7·22马里炸弹袭击事件」（2022 年） |
+| 国家错配 | 搜 Mali 返回「尼日利亚多地」和「阿富汗山洪」 |
+| 组织宣称夸大 | `Al-Shabaab said it killed 321 soldiers` |
+
+**国家错配占 64%** —— 检索通道不保证结果与查询国家一致，不校验就会
+在台账里写出「马里：阿富汗山洪致 20 人死亡」。
+
+#### 为什么事后过滤追不上
+
+加了三轮过滤规则（汇总、事故、反恐战果、历史回顾、死亡数上限、
+摘要去重、国家校验），候选从 217 条压到 25 条，有效比例仍只有 28%。
+
+搜索结果里什么都有，靠正则一条条追，永远慢一步，而且每加一条规则
+都可能误伤真事件。这是**源头信噪比**的问题，不是过滤写得不够。
+
+#### 给它找了第二个用途，也失败了
+
+原本想让自采候选和 UCDP 事件做匹配：匹配上的不新增事件，只把新闻
+链接附到 UCDP 那条上 —— 这样既补了可回溯性，又不重复计数。
+
+实测：**8 条匹配里只有 1–2 条真是同一事件。**
+
+```
+UCDP: Fuerzas Militares reportan la liberación de los 39 civiles secuestrados
+新闻: Drone attack on a Colombian military base leaves 3 dead
+→ 完全不同的事件，被配到一起
+```
+
+根因是 UCDP 摘要太简略（`Nine killed in attack`），和新闻标题几乎
+没有共同实词。加了「关键词重叠 ≥2」的要求后，匹配从 173 条降到 9 条，
+准确率仍不到三成。
+
+**结论：靠摘要做事件级匹配不可行。** 这个功能改成默认关闭。
+
+#### 现在的做法
+
+```bash
+python scripts/run_pipeline.py --month 2026-07 --ucdp-auto \
+    --self-harvest --search-cmd 'yb.cmd search "{q}" --cnt 20' --outdir ./out
+```
+
+产出两份：
+
+- **主台账** —— 只含 UCDP 事件，351 条，分档甲22/乙59/丙270，与前一致
+- **自采线索.jsonl** —— 自采候选，标「疑似 UCDP 未收录，需人工核实」
+
+**主台账不被污染，自采的价值（提示哪里可能漏了）保留。**
+
+代价是这批线索仍需人工核。但人工核 25 条线索，比翻遍全网找漏容易得多。
+
 #### 一句话
 
 **信源表的角色是「给事件找报道、给报道归属机构」，不是「逐家去问有没有事」。**

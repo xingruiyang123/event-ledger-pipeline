@@ -233,6 +233,18 @@ def split_blocks(txt, size=700):
 
 DATE_PAT = re.compile(
     r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})", re.I)
+# 相对日期：中文「7月2日」、英文「July 3」「3 July」
+# 搜索结果里日期大多是这个形态，完整年份格式很少见。
+REL_ZH = re.compile(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日")
+REL_EN_MD = re.compile(
+    r"(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December)\s+(\d{1,2})", re.I)
+REL_EN_DM = re.compile(
+    r"\b(\d{1,2})\s+(January|February|March|April|May|June|July|August|"
+    r"September|October|November|December)", re.I)
+MON = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july",
+     "august", "september", "october", "november", "december"], 1)}
 
 
 def grab_date(s, year, month):
@@ -248,6 +260,25 @@ def grab_date(s, year, month):
         y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
         if 1 <= mo <= 12 and 1 <= d <= 31:
             return "%s-%02d-%02d" % (y, mo, d)
+
+    # 相对日期：用目标年月补全。
+    # 只在「没有完整年份」时用，且要求月份与目标月份一致 ——
+    # 不一致说明是别的月份，返回空让上层丢弃。
+    m = REL_ZH.search(s)
+    if m:
+        mo, d = int(m.group(1)), int(m.group(2))
+        if 1 <= mo <= 12 and 1 <= d <= 31 and mo == int(month):
+            return "%d-%02d-%02d" % (int(year), mo, d)
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            return "%d-%02d-%02d" % (int(year), mo, d)
+
+    for pat, mi, di in ((REL_EN_MD, 1, 2), (REL_EN_DM, 2, 1)):
+        m = pat.search(s)
+        if m:
+            mon = MON.get(m.group(mi).lower())
+            d = int(m.group(di))
+            if mon and 1 <= d <= 31:
+                return "%d-%02d-%02d" % (int(year), mon, d)
     return ""
 
 

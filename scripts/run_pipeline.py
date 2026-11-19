@@ -37,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -388,6 +389,15 @@ def main():
                     help="ACLED 最多翻多少页（每页 5000 条）")
     ap.add_argument("--nonlethal-top", type=int, default=20,
                     help="未遂专项查事件最多的前 N 个国家（默认 20，每国 3 条检索式）")
+    ap.add_argument("--self-harvest", action="store_true",
+                    help="开一路自采：按「国家 × 事件类型」组合检索新闻，"
+                         "补 UCDP 收录不到的媒体独家事件。需给 --search-cmd。"
+                         "实测 2026-07 马里+索马里：166 条候选 → 4 个事件，"
+                         "其中 2 起确认不在 UCDP 里")
+    ap.add_argument("--self-harvest-top", type=int, default=12,
+                    help="自采跑事件最多的前 N 个国家（默认 12，每国 10-12 条查询）")
+    ap.add_argument("--self-harvest-budget", type=int, default=600,
+                    help="自采时间预算秒数（默认 600）")
     ap.add_argument("--nonlethal", action="store_true",
                     help="额外开一路「未遂/非致命专项检索」，需同时给 --search-cmd")
     a = ap.parse_args()
@@ -670,6 +680,80 @@ def main():
 
         if a.stage == "harvest":
             return 0
+
+    # ---- 自采：补 UCDP 收录不到的媒体独家事件 ----
+    if a.self_harvest and a.search_cmd and a.stage in ("all", "judge"):
+        _sh_in = os.path.join(od, "01a_ucdp.jsonl")
+        if not os.path.isfile(_sh_in):
+            _sh_in = cand
+        if os.path.isfile(_sh_in):
+            # 取事件数最多的前 N 国（用中文名 -> 英文名反查）
+            import json as _json
+            _cnt = {}
+            for _line in io.open(_sh_in, encoding="utf-8"):
+                _line = _line.strip()
+                if not _line:
+                    continue
+                try:
+                    _r = _json.loads(_line)
+                except Exception:  # noqa: BLE001
+                    continue
+                _c = str(_r.get("country") or "").strip()
+                if _c:
+                    _cnt[_c] = _cnt.get(_c, 0) + 1
+            _top = [c for c, _ in sorted(_cnt.items(),
+                                         key=lambda x: -x[1])[:a.self_harvest_top]]
+            _en = []
+            try:
+                import sys as _sys
+                _sys.path.insert(0, HERE)
+                import harvest_country_matrix as _hm
+                _rev = {v: k for k, v in getattr(_hm, "ZH_NAME", {}).items()}
+                for _c in _top:
+                    _e = _rev.get(_c)
+                    if _e:
+                        _en.append(_e)
+            except Exception as _e:  # noqa: BLE001
+                print("  （取英文国名失败：%s）" % str(_e)[:60])
+            if _en:
+                print("")
+                print("▶ 自采补漏：%d 个国家（%s…）" % (len(_en), "、".join(_en[:4])))
+                _sh_out = os.path.join(od, "01c_自采.jsonl")
+                _t0 = time.time()
+                try:
+                    _sp = subprocess.run(
+                        [PY, os.path.join(HERE, "harvest_country_matrix.py"),
+                         "--month", a.month,
+                         "--countries", ",".join(_en),
+                         "--search-cmd", a.search_cmd,
+                         "--out", _sh_out],
+                        capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", env=_clean_env(),
+                        timeout=a.self_harvest_budget)
+                    for _l in (getattr(_sp, "stdout", "") or "").split("\n"):
+                        if "合计" in _l or "条查询" in _l:
+                            print("    " + _l.strip())
+                except subprocess.TimeoutExpired:
+                    print("    自采超时（预算 %ds），用已采到的部分" % a.self_harvest_budget)
+                if os.path.isfile(_sh_out):
+                    _mg = os.path.join(od, "01d_合并.jsonl")
+                    run_step("合并自采候选",
+                             [os.path.join(HERE, "merge_self_harvest.py"),
+                              "--ucdp", _sh_in, "--matrix", _sh_out,
+                              "--month", a.month, "--out", _mg],
+                             expect=0, allow_fail=True)
+                    if os.path.isfile(_mg):
+                        # 判定输入用合并结果（其中已剔掉自采候选，只保留
+                        # UCDP 事件 + 补上的新闻印证），自采候选另出线索清单
+                        cand = _mg
+                        _clue = os.path.join(od, "自采线索.jsonl")
+                        if os.path.isfile(_clue):
+                            _n = sum(1 for _l in io.open(_clue, encoding="utf-8")
+                                     if _l.strip())
+                            print("    自采线索 %d 条另存：自采线索.jsonl" % _n)
+                            print("    （不并入主台账 —— 实测信噪比约 1:3，"
+                                  "并入会拉低精确率；请人工核这些线索）")
+                print("  自采耗时 %.0f 秒" % (time.time() - _t0))
 
     # ============ 阶段 2：判定 ============
     if a.stage in ("judge", "all"):
