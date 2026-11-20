@@ -86,7 +86,19 @@ def clean_env():
     return e
 
 
-def search_json(cmd_tpl, q, timeout=60):
+def search_json(cmd_tpl, q, timeout=90):
+    """跑一条检索通道，返回 [{title, url, content}]。
+
+    两种输出形态都要认，因为本机三条通道形态不同：
+
+      元宝 WSA     JSON（results[].{title,url,content}），但 2026-11-20 欠费
+      Tavily CLI   JSON（results[].{title,url,content}，content 有正文段落）
+      TinyFish     纯文本块：``[1] 标题`` 换行 缩进 URL，**没有摘要**
+
+    通道不可用（欠费/额度）必须显式报出来，不能静默返回空 ——
+    实测教训：元宝欠费时 17 条全部返回 0，差一点被记成
+    「搜不到同事件报道」，把通道故障误判成数据事实。
+    """
     cmd = cmd_tpl.replace("{q}", q.replace('"', " "))
     try:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
@@ -95,13 +107,79 @@ def search_json(cmd_tpl, q, timeout=60):
         out = r.stdout or ""
     except Exception:  # noqa: BLE001
         return []
+
+    low = out.lower()
+    if ("欠费" in out or "resourceunavailable" in low
+            or "insufficient" in low or "no longer updated" in low and False):
+        print("      ! 检索通道不可用（欠费/额度）：%s"
+              % out.strip().split("\n")[0][:60])
+        return []
+
     i = out.find("{")
-    if i < 0:
-        return []
-    try:
-        return (json.loads(out[i:]) or {}).get("results") or []
-    except Exception:  # noqa: BLE001
-        return []
+    if i >= 0:
+        try:
+            j = json.loads(out[i:])
+            return (j or {}).get("results") or []
+        except Exception:  # noqa: BLE001
+            pass
+
+    return _parse_text_results(out)
+
+
+def search_multi(cmds, q, timeout=60):
+    """按顺序试多条检索通道，返回 (results, engine, has_snippet)。
+
+    为什么需要多通道，且必须优先选「能给摘要」的那条
+    -----------------------------------------------
+    实测 2026-11-20 三条通道的能力差异：
+
+      元宝 WSA      给摘要，但账号欠费 → ResourceUnavailable
+      Tavily CLI    给摘要（content 字段有正文段落）
+      TinyFish CLI  **只给标题 + URL，不给摘要**
+
+    一开始用元宝，17 条全部返回 0，差点记成「搜不到同事件报道」，
+    实际是欠费。改用 TinyFish 拿到 11 条但摘要全空 ——
+    只有标题和链接，证明得了「这件事有人报了」，
+    证明不了「内容是什么」，下游做字段抽取时不能当依据。
+
+    用户 2026-11-20 明确要求「保留摘要原文」，所以排序是：
+    能给摘要的优先；拿不到摘要也留着（标 evidence_strength=title_only），
+    但不假装它等同于摘要。
+    """
+    best = ([], "", False)
+    for cmd in cmds:
+        cmd = (cmd or "").strip()
+        if not cmd:
+            continue
+        res = search_json(cmd, q, timeout)
+        if not res:
+            continue
+        has_snip = any((r.get("content") or r.get("passage") or "").strip()
+                       for r in res)
+        engine = os.path.basename(str(cmd).split()[0]).replace(".cmd", "")
+        if has_snip:
+            return res, engine, True      # 有摘要，直接用
+        if not best[0]:
+            best = (res, engine, False)   # 先留着，继续试下一条
+    return best
+
+
+def _parse_text_results(out):
+    """解析 [n] 标题 / 缩进 URL 的纯文本结果。"""
+    res = []
+    lines = out.split("\n")
+    cur_title = None
+    for ln in lines:
+        m = re.match(r"^\s*\[(\d+)\]\s*(.+?)\s*$", ln)
+        if m:
+            cur_title = m.group(2)
+            continue
+        m2 = re.match(r"^\s+(https?://\S+)\s*$", ln)
+        if m2 and cur_title:
+            res.append({"title": cur_title, "url": m2.group(1),
+                        "content": "", "site": host_of(m2.group(1))})
+            cur_title = None
+    return res
 
 
 def host_of(u):
@@ -123,7 +201,8 @@ def main():
     ap = argparse.ArgumentParser(
         description="搜索通道补充被反爬挡住的高价值信源")
     ap.add_argument("--store", default=r"D:\event-ledger-data")
-    ap.add_argument("--search-cmd", required=True)
+    ap.add_argument("--search-cmd", action="append", required=True,
+                    help="可给多次，按顺序试。能给摘要的通道优先会自动选")
     ap.add_argument("--tiers", default="P1", help="跑哪些档，逗号分隔")
     ap.add_argument("--limit", type=int, default=0, help="本轮最多补几条")
     ap.add_argument("--sleep", type=float, default=0.5)
@@ -201,7 +280,7 @@ def main():
                 n_miss += 1
                 continue
 
-            res = search_json(a.search_cmd, q)
+            res, engine, has_snip = search_multi(a.search_cmd, q)
 
             # 判据分两级，因为搜索结果的性质不同：
             #
@@ -232,6 +311,7 @@ def main():
                 continue
 
             best = mine[0]
+            snippet = (best.get("content") or best.get("passage") or "")[:2000]
             rec = {
                 # doc_id 与全文证据共用同一个 id，保证证据能关联
                 "doc_id": st.put(u, b"", 0, "", u,
@@ -250,7 +330,13 @@ def main():
                 "result_title": best.get("title"),
                 "result_site": best.get("site"),
                 "result_domain": host_of(best.get("url")),
-                "snippet": (best.get("content") or best.get("passage") or "")[:2000],
+                "snippet": snippet,
+                # 证据强度要标出来。只有标题+链接的，能证明「这件事有人报了」，
+                # 不能证明「内容是什么」—— 下游做字段抽取时不能拿它当依据。
+                # 用户 2026-11-20 要的是「保留摘要原文」，
+                # 拿不到摘要时要如实标注，不能假装有。
+                "evidence_strength": "snippet" if snippet else "title_only",
+                "engine": engine,
                 "evidence_kind": "search_snippet",
             }
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")

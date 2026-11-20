@@ -78,7 +78,11 @@ if ($rc -eq 0) { $rc = $rcArt }
 $supArgs = @(
     "-W", "ignore", (Join-Path $pipe "scripts\supplement_by_search.py"),
     "--store", $root,
-    "--search-cmd", 'D:\DSH\yb.cmd search "{q}" --cnt 10',
+    # 两条通道按顺序试，能给摘要的优先。
+    # 实测 2026-11-20：元宝欠费（ResourceUnavailable）、TinyFish 只给标题不给摘要，
+    # 只有 Tavily 的 content 字段有正文段落 —— 而用户要求「保留摘要原文」。
+    "--search-cmd", 'D:\DSH\tvly.cmd search "{q}" --json --max-results 10',
+    "--search-cmd", 'D:\DSH\tf.cmd search "{q}"',
     "--tiers", "P1",
     "--sleep", "0.3"
 )
