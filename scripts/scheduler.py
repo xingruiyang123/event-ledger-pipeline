@@ -587,16 +587,27 @@ def load_registry(path, sheet=None, priority=None):
     ci_pri = col("重要性等级", "优先级", "priority")
     ci_cat = col("机构类型", "类别")
     ci_st = col("入口类型")
+    ci_status = col("状态")
 
     out = []
     pri_set = None
     if priority:
         pri_set = set(x.strip().upper() for x in priority.split(","))
+    skip = 0
     for r in rows[1:]:
         if not r or not r[0] or ci_dom is None or not r[ci_dom]:
             continue
         pri = str(r[ci_pri] or "").strip().upper() if ci_pri is not None else ""
         if pri_set and pri not in pri_set:
+            continue
+        # 显式排除的源直接跳过。
+        # 实测 2026-11-20：8 家「采不完」的源被容量告警抓出来 ——
+        # bolnews 日更 27 万（sitemap 全站且每轮全变）、gov.uk 5 万、
+        # yahoo 1.3 万，间隔压到 1 小时仍追不上，且都不是新闻源。
+        # 这类源应该排除，不能让它们把采集预算吃掉。
+        status = str(r[ci_status] or "").strip() if ci_status is not None else ""
+        if status in ("排除", "停用"):
+            skip += 1
             continue
         kind = str(r[ci_st] or "").strip() if ci_st is not None else ""
         out.append({
@@ -607,6 +618,8 @@ def load_registry(path, sheet=None, priority=None):
             "category": str(r[ci_cat] or "").strip() if ci_cat is not None else "",
             "kind": kind,
         })
+    if skip:
+        print("  已排除 %d 家（状态标为排除/停用）" % skip)
     return out
 
 
