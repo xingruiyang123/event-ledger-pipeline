@@ -64,6 +64,7 @@ def classify_error(e):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--state-dir", default=r"D:\event-ledger-data\state")
+    ap.add_argument("--store", default=r"D:\event-ledger-data", help="原始层根目录")
     ap.add_argument("--out", default=None, help="报告输出（.md 或 .json）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
@@ -205,6 +206,63 @@ def main():
     for x in rep["top_yield"][:10]:
         L.append("    %-26s 新增 %4s ｜ 容量 %4s ｜ 日更 %s"
                  % (str(x["domain"])[:24], x["new"], x["capacity"], x["rate"]))
+    L.append("")
+
+    # ── 七、正文层 ──
+    # 用户 2026-11-20 指出：入口覆盖、正文获取率、采集成功率这三个数
+    # "都不能直接代表全球恐怖主义事件发现率"。所以这一节只报事实，
+    # 不给汇总成一个"总成功率"—— 那会把三种不同的失败混成一个数。
+    L.append("  ── 七、正文层：候选抓到全文了吗 ──")
+    try:
+        import glob as _g
+        import os as _os
+        n_full = n_snip = n_fail = 0
+        for mp in _g.glob(_os.path.join(a.store, "raw/meta", "*", "*.json")):
+            try:
+                m = json.load(io.open(mp, encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if m.get("kind") != "article":
+                continue
+            if m.get("evidence_kind") == "search_snippet":
+                n_snip += 1
+                continue
+            # 判"有全文"要看 failed 标记和实际字节数，两个都要。
+            # 只看 n_bytes 会把「抓到了但 meta 没记字节数」的误判成失败 ——
+            # 实测正文快照 13,197 篇、全文证据却报 0 篇，就是这个原因。
+            if m.get("failed"):
+                n_fail += 1
+                continue
+            nb = int(m.get("n_bytes") or 0)
+            if not nb:
+                for v in (m.get("versions") or []):
+                    nb = max(nb, int(v.get("bytes") or 0))
+            if nb >= 500:
+                n_full += 1
+            else:
+                n_fail += 1
+        tot = n_full + n_snip + n_fail
+        if tot:
+            L.append("    全文证据        %d 篇（%.1f%%）"
+                     % (n_full, 100.0 * n_full / tot))
+            L.append("    仅摘要证据      %d 篇（%.1f%%）"
+                     % (n_snip, 100.0 * n_snip / tot))
+            L.append("    两次都没拿到    %d 篇（%.1f%%）"
+                     % (n_fail, 100.0 * n_fail / tot))
+        # 弃抓数：失败达上限、不再排队的
+        dead = 0
+        for mp in _g.glob(_os.path.join(a.store, "raw/meta", "*", "*.json")):
+            try:
+                m = json.load(io.open(mp, encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            if int(m.get("fail_count") or 0) >= int(
+                    _os.environ.get("ARTICLE_MAX_FAIL", "3")):
+                dead += 1
+        if dead:
+            L.append("    已弃抓          %d 篇（失败达上限，转搜索或人工）" % dead)
+    except Exception:  # noqa: BLE001
+        L.append("    （正文层统计不可用）")
     L.append("")
 
     txt = "\n".join(L)

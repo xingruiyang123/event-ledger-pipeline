@@ -263,18 +263,52 @@ def main():
                 f.write(json.dumps(c, ensure_ascii=False) + "\n")
         print("    候选清单 → %s" % a.candidates_out)
 
-    # 已经抓过正文的跳过（raw_store 里 kind=article 的）
+    # 已经抓过正文的跳过。
+    #
+    # 这里必须区分「抓到了」和「试过但失败了」：
+    # 抓取失败时 raw_store 也会写一条 meta（body 为空），如果只看
+    # kind=article 就把它当成功，会漏掉该重试的；
+    # 如果完全不看，又会每轮把同一批死链重新抓一遍 ——
+    # 实测每轮 600 篇里稳定有 134 篇失败，就是同一批 403 死循环占配额。
+    #
+    # 所以：成功的跳过；失败的记进 fail_counts，超过阈值就不再排。
     import glob
     have = set()
+    fail_counts = {}
     for mp in glob.glob(os.path.join(store.root, "raw/meta", "*", "*.json")):
         try:
             m = json.load(io.open(mp, encoding="utf-8"))
         except Exception:  # noqa: BLE001
             continue
-        if m.get("kind") == "article":
-            have.add(m.get("url"))
-    todo = [c for c in cands if c["url"] not in have]
-    print("    已抓过 %d 篇，待抓 %d 篇" % (len(cands) - len(todo), len(todo)))
+        if m.get("kind") != "article":
+            continue
+        url = m.get("url")
+        if not url:
+            continue
+        # 有实际内容的才算成功
+        nbytes = int(m.get("n_bytes") or 0)
+        if not nbytes:
+            vers = m.get("versions") or []
+            if vers:
+                nbytes = int(vers[-1].get("bytes") or 0)
+        if nbytes >= 500:
+            have.add(url)
+        else:
+            fail_counts[url] = int(m.get("fail_count") or 1)
+
+    # 失败次数已达上限的不再排 —— 留着让人工或搜索通道处理，
+    # 不再每轮白占 600 篇的配额。
+    MAX_FAIL = int(os.environ.get("ARTICLE_MAX_FAIL", "3"))
+    skipped_dead = [c for c in cands
+                    if c["url"] not in have
+                    and fail_counts.get(c["url"], 0) >= MAX_FAIL]
+    todo = [c for c in cands
+            if c["url"] not in have
+            and fail_counts.get(c["url"], 0) < MAX_FAIL]
+    print("    已抓过 %d 篇，待抓 %d 篇" % (len(have), len(todo)))
+    if skipped_dead:
+        print("    弃抓 %d 篇（失败已达 %d 次，转搜索通道或人工）"
+              % (len(skipped_dead), MAX_FAIL))
 
     # 限流必须在去重之后。
     # 原来写成先 cands[:limit] 再去重，后果是每轮只取候选清单的前 300 条，
@@ -309,6 +343,24 @@ def main():
     def work(c):
         code, body, enc, final = S.http_get(c["url"], a.timeout, retries=1)
         if code != 200 or len(body) < 500:
+            # 失败也要记账 —— 否则同一批死链会被无限重试。
+            # 写一条 body 为空、带 fail_count 的 meta，下一轮的
+            # 待抓清单里就能识别出「这个 URL 已经失败 N 次了」。
+            # 实测教训：不记账时每轮 600 篇里稳定 134 篇是同一批
+            # 403/404 死链，永远抓不到，却每轮占满配额。
+            try:
+                from raw_store import doc_id_of
+                prev = store.get_meta(doc_id_of(c["url"])) or {}
+                fc = int(prev.get("fail_count") or 0) + 1
+                store.put(c["url"], b"", code, enc or "", final or c["url"],
+                          extra={"kind": "article",
+                                 "title": c.get("title"),
+                                 "from_domain": c.get("from_domain"),
+                                 "failed": True,
+                                 "fail_count": fc,
+                                 "last_code": code})
+            except Exception:  # noqa: BLE001
+                pass
             return {"ok": False, "url": c["url"], "code": code}
         try:
             store.put(c["url"], body, code, enc, final,
