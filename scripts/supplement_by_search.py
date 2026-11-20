@@ -400,7 +400,16 @@ def _pick_same_event(results, query):
         return set(w for w in re.findall(r"[A-Za-z]{3,}", str(t or "").lower())
                    if w not in STOP)
 
-    # 专名：原标题里首字母大写、且不是第一个词
+    # 专名：原标题里首字母大写、且不是第一个词。
+    # 但要排除「句首大写」—— 标题里每个词都可能大写，
+    # 而 URL slug 转出来的查询全小写、没有大小写信息。
+    # 实测这两种情况都出现过：
+    #   「confirms houthi attack damaged riyadhs tallest building」
+    #     → 全小写，proper 为空集，专名验证被跳过，靠 3 实词重叠仍然配不上
+    #       （返回的标题说 Saudi / Riyadh / tower，而查询里是 riyadhs/tallest）
+    #   「Basilan judge shot dead」→ Basilan 是大写专名，能正确约束
+    # 所以 proper 为空时，退化为「必须有一个长度 ≥6 的实词重合」，
+    # 这类词基本是地名或组织名，泛词（dead/attack/judge）都偏短。
     raw_words = re.findall(r"[A-Za-z][A-Za-z'\-]{2,}", str(query or ""))
     proper = set()
     for idx, w in enumerate(raw_words):
@@ -412,20 +421,47 @@ def _pick_same_event(results, query):
     qw = words(query)
     if not qw:
         return None
+    # 长实词：地名、组织名的典型长度
+    long_qw = set(w for w in qw if len(w) >= 6)
+
+    # 城市/地名白名单式加权。搜索结果里同一个事件常换说法：
+    #   查询说 riyadhs tallest building，结果说 Riyadh Skyscraper
+    #   查询说 Basilan judge，结果说 Zamboanga City
+    # 词面重合度只有 1-2 个，严格门槛会全部落空。
+    # 而这类词一出现，基本就能确认是同一事件的不同表述 ——
+    # 所以给地名单独算作强证据，不要求与查询词面相同。
+    PLACE = set("""riyadh riyadhs saudi israel iranian iran gaza lebanon
+    houthi houthis hamas hezbollah yemen yemeni pakistan afghanistan
+    syria syrian iraq iraqi kuwait bahrain qatar emirates oman jordan
+    egypt libya sudan somalia nigeria mali niger chad cameroon burkina
+    philippines mindanao zamboanga basilan maguindanao manila
+    jerusalem golan beirut damascus baghdad tehran kabul karachi
+    lagos abuja nairobi mogadishu bamako niamey khartoum tripoli
+    london paris berlin brussels washington moscow beijing tokyo
+    ukraine russian russia kremlin nato pentagon nytimes""".split())
 
     best, best_score = None, 0
     for r in results:
         title = str(r.get("title") or "")
         rw = words(title)
         n = len(qw & rw)
-        if n < 3:
-            continue
-        # 专名验证：结果的标题里必须出现原查询里的某个专名
         tl = title.lower()
-        has_proper = any(p in tl for p in proper) if proper else False
-        if proper and not has_proper:
+        has_place = any(p in tl for p in (qw & PLACE) | (long_qw & PLACE))
+        # 判据组合：
+        #   3 个实词重合（最可靠）
+        #   或 2 个实词重合 + 地名对上
+        #   或 1 个实词重合 + 地名对上 + 查询本身很短（≤3 实词，词面本就稀）
+        if n >= 3:
+            score = n + (2 if has_place else 0)
+        elif n >= 2 and has_place:
+            score = n + 2
+        elif n >= 1 and has_place and len(qw) <= 4:
+            score = n + 1
+        else:
             continue
-        score = n + (2 if has_proper else 0)
+        # 专名验证：有专名信息时，专名必须出现
+        if proper and not any(p in tl for p in proper) and not has_place:
+            continue
         if score > best_score:
             best, best_score = r, score
     return best
