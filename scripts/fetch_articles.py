@@ -340,12 +340,24 @@ def main():
                       % (i, len(todo), n_ok, n_fail, el,
                          i / max(el / 60, 0.01)))
 
+    # 失败明细要记全，不能只留 30 条样本。
+    # 原来写的是 [:30]，实测失败 133 条时只留了 30 条，
+    # 导致按失败码统计出来的分布完全失真 —— 想查「403 占多少」都查不准。
+    # 现在按码聚合全量，明细只留前 200 条供抽查。
+    fails = [r for r in results if not r["ok"]]
+    by_code = {}
+    for r in fails:
+        k = str(r.get("code"))
+        by_code[k] = by_code.get(k, 0) + 1
+
     rep = {
         "feed_snapshots": n_feed, "feed_entries": n_entry,
         "candidates": len(cands), "attempted": len(todo),
         "ok": n_ok, "failed": n_fail,
+        "success_rate": round(100.0 * n_ok / max(1, len(todo)), 1),
         "elapsed_s": round(time.time() - t0, 1),
-        "sample_failures": [r for r in results if not r["ok"]][:30],
+        "failed_by_code": by_code,
+        "sample_failures": fails[:200],
     }
     if a.report:
         io.open(a.report, "w", encoding="utf-8").write(

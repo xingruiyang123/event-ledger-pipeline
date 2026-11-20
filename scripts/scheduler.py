@@ -80,6 +80,7 @@ R 未知时（新源）取保守值：T = 6 小时。
 """
 import argparse
 import io
+import hashlib
 import json
 import os
 import re
@@ -132,8 +133,22 @@ def parse_iso(s):
         return None
 
 
-def slug(domain):
-    return re.sub(r"[^a-z0-9._-]+", "_", str(domain).lower())[:80]
+def slug(domain, feed_url=""):
+    """状态文件名。
+
+    一个域名可以挂多条入口 —— 实测 gov.uk 拆成 5 个定向栏目
+    （Home Office 涉恐 / 全部公告 / Cabinet Office / 全政府涉恐 / 全政府国安），
+    它们共享主域名但 URL 不同。只按域名做 key，5 个栏目会写同一个状态文件，
+    互相覆盖：第一个建好基线后，后面四个读到的都是"刚抓过"，
+    于是全部返回 0 条 —— 实测正是如此。
+
+    所以有 feed_url 时把它的哈希并进 key，多入口才能各记各的状态。
+    """
+    base = re.sub(r"[^a-z0-9._-]+", "_", str(domain).lower())
+    if feed_url:
+        h = hashlib.sha1(str(feed_url).encode("utf-8")).hexdigest()[:8]
+        return (base[:60] + "_" + h)
+    return base[:80]
 
 
 class State:
@@ -196,7 +211,19 @@ class State:
         t = life_h * ALPHA
         return max(T_MIN_H, min(T_MAX_H, t))
 
-    def due_at(self):
+    def interval_with_status(self, reconfigure=False):
+        """按信源状态给间隔。
+
+        RECONFIGURE 的源本身有价值但入口配置不对（反爬、sitemap 膨胀、
+        栏目选错）。停掉会丢信息，全速跑又追不上 —— 所以降为每天一次，
+        保持"还在采"但不占预算，等人来重新配置。
+        """
+        base = self.safe_interval_h()
+        if reconfigure:
+            return max(base, 24.0)
+        return base
+
+    def due_at(self, reconfigure=False):
         if self.d.get("dead"):
             nxt = parse_iso(self.d.get("last_ok_at")) or now()
             return nxt + timedelta(hours=DEAD_INTERVAL_H)
@@ -205,7 +232,7 @@ class State:
         brk = parse_iso(self.d.get("break_until"))
         if brk and brk > now():
             return brk
-        return base + timedelta(hours=self.safe_interval_h())
+        return base + timedelta(hours=self.interval_with_status(reconfigure))
 
     def is_due(self, t=None):
         return (t or now()) >= self.due_at()
@@ -468,7 +495,14 @@ def parse_feed(raw):
 def process_source(rec, state_dir, store, args):
     """处理一个源：抓入口 → 解析 → 判增量 → 落快照 → 更新状态。"""
     dom = rec["domain"]
-    sp = os.path.join(state_dir, slug(dom) + ".json")
+    # 状态文件按 (域名, 入口URL) 区分，不是只按域名。
+    # 实测教训：gov.uk 拆成 5 个定向栏目共享主域名，只按域名做 key 时
+    # 5 个栏目写同一个状态文件 —— 第一个建好基线后，后四个读到
+    # 「刚抓过 20 条」，fresh 全空，于是永远返回 0 新增。
+    # 更隐蔽的是：slug() 里用了 hashlib 但没 import，抛的 NameError
+    # 被上层 except 吞掉，5 个栏目全回落到同一个默认文件名，
+    # 表面看是「去重生效」，实际是状态串了。
+    sp = os.path.join(state_dir, slug(dom, rec.get("feed_url") or "") + ".json")
     st = State.load(sp)
     if not st.d:
         st.d = {"domain": dom, "name": rec.get("name"),
@@ -554,7 +588,12 @@ def process_source(rec, state_dir, store, args):
     st.remember([e["id"] for e in entries])
     st.save(sp)
 
+    # n_new 只数真正新入库的条目。多入口指向同一域名时（如 gov.uk 的 5 个
+    # 定向栏目），后抓的栏目里若有公告已被前一个栏目收过，n_new 会是 0 ——
+    # 这不是失败，是去重生效。所以另给 n_seen（本入口看到多少条）
+    # 和 n_dup（其中已存在多少条），让监控能区分"入口坏了"和"内容重复"。
     return {"domain": dom, "status": "ok", "n_new": len(fresh),
+            "n_seen": len(entries), "n_dup": len(entries) - len(fresh),
             "n_entries": len(entries), "capacity_warn": bool(warn),
             "first": is_first,
             "interval_h": round(st.safe_interval_h(), 1),
@@ -600,15 +639,19 @@ def load_registry(path, sheet=None, priority=None):
         pri = str(r[ci_pri] or "").strip().upper() if ci_pri is not None else ""
         if pri_set and pri not in pri_set:
             continue
-        # 显式排除的源直接跳过。
-        # 实测 2026-11-20：8 家「采不完」的源被容量告警抓出来 ——
-        # bolnews 日更 27 万（sitemap 全站且每轮全变）、gov.uk 5 万、
-        # yahoo 1.3 万，间隔压到 1 小时仍追不上，且都不是新闻源。
-        # 这类源应该排除，不能让它们把采集预算吃掉。
-        status = str(r[ci_status] or "").strip() if ci_status is not None else ""
-        if status in ("排除", "停用"):
+        # 三态处理。用户 2026-11-20 定的原则：
+        # 「排除某个采集入口，不等于永久删除对应的信息来源。」
+        #
+        #   ACTIVE       正常采集
+        #   RECONFIGURE  仍采集，但降频（每天最多一次）+ 记告警。
+        #                这类源本身有价值、入口配置不对（反爬、sitemap 膨胀、
+        #                栏目选错），停掉会丢信息，全速跑又追不上。
+        #   EXCLUDED     跳过
+        status = str(r[ci_status] or "").strip().upper() if ci_status is not None else ""
+        if status in ("EXCLUDED", "排除", "停用"):
             skip += 1
             continue
+        reconfigure = status in ("RECONFIGURE", "待核验", "待核查", "待探测")
         kind = str(r[ci_st] or "").strip() if ci_st is not None else ""
         out.append({
             "domain": str(r[ci_dom]).strip().lower().replace("www.", ""),
@@ -617,9 +660,14 @@ def load_registry(path, sheet=None, priority=None):
             "priority": pri,
             "category": str(r[ci_cat] or "").strip() if ci_cat is not None else "",
             "kind": kind,
+            "status": status or "ACTIVE",
+            "reconfigure": reconfigure,
         })
     if skip:
-        print("  已排除 %d 家（状态标为排除/停用）" % skip)
+        print("  已排除 %d 家（EXCLUDED）" % skip)
+    n_re = sum(1 for x in out if x["reconfigure"])
+    if n_re:
+        print("  %d 家为 RECONFIGURE：仍采集但降为每日一次" % n_re)
     return out
 
 
@@ -679,21 +727,21 @@ def main():
     due, notdue, noentry = [], 0, 0
     t = now()
     for r in srcs:
-        sp = os.path.join(state_dir, slug(r["domain"]) + ".json")
+        sp = os.path.join(state_dir, slug(r["domain"], r.get("feed_url", "")) + ".json")
         st = State.load(sp)
         if not (r.get("feed_url") or st.d.get("feed_url")):
             noentry += 1
             continue
-        if a.force or st.is_due(t):
+        if a.force or st.due_at(r.get("reconfigure")) <= t:
             due.append(r)
         else:
             notdue += 1
 
     # 到期里按"逾期时长"排序——越该抓的越靠前
     def overdue_h(r):
-        sp = os.path.join(state_dir, slug(r["domain"]) + ".json")
+        sp = os.path.join(state_dir, slug(r["domain"], r.get("feed_url", "")) + ".json")
         st = State.load(sp)
-        d = st.due_at()
+        d = st.due_at(r.get("reconfigure"))
         return (t - d).total_seconds() / 3600.0
 
     due.sort(key=lambda r: -overdue_h(r))
@@ -706,7 +754,7 @@ def main():
 
     if a.dry_run:
         for r in due[:15]:
-            sp = os.path.join(state_dir, slug(r["domain"]) + ".json")
+            sp = os.path.join(state_dir, slug(r["domain"], r.get("feed_url", "")) + ".json")
             st = State.load(sp)
             print("    %-30s 逾期 %5.1fh  间隔 %5.1fh  上次新增 %s"
                   % (r["domain"][:28], overdue_h(r), st.safe_interval_h(),
@@ -717,9 +765,9 @@ def main():
 
     if not due:
         print("  本轮无到期信源。下一轮最早应在 %s"
-              % (min((State.load(os.path.join(state_dir, slug(r["domain"]) + ".json"))
+              % (min((State.load(os.path.join(state_dir, slug(r["domain"], r.get("feed_url", "")) + ".json"))
                       .due_at() for r in srcs
-                      if os.path.isfile(os.path.join(state_dir, slug(r["domain"]) + ".json"))),
+                      if os.path.isfile(os.path.join(state_dir, slug(r["domain"], r.get("feed_url", "")) + ".json"))),
                      default="—")))
         return 0
 
