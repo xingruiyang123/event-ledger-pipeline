@@ -180,8 +180,15 @@ def main():
         n_parse, "" if n_parse == 0 else "   ← 这些入口 URL 是探测假阳性，需重新探测"))
     L.append("")
     L.append("  ── 三、增量层：有新的吗 ──")
-    L.append("    本轮新增        %d 篇（%d 家已跑过两轮以上）" % (n_new, len(warm)))
-    L.append("    首轮基线        %d 条（%d 家只跑过一次，不算增量）" % (n_baseline, len(first)))
+    # 标签必须写准。「本轮新增」是错的说法 ——
+    # 每个源的「最近一轮」发生在不同时刻（自适应间隔决定的），
+    # 把它们加起来不等于「我们本轮抓到 10 万篇」。
+    # 实测踩过：状态迁移后报告显示「本轮新增 100,213 篇」，
+    # 实际是几十个源各自最近一次的增量拼在一起。
+    L.append("    各源最近一次新增合计 %d 篇（%d 家已跑过两轮以上）"
+             % (n_new, len(warm)))
+    L.append("    首轮基线        %d 条（%d 家只跑过一次，不算增量）"
+             % (n_baseline, len(first)))
     L.append("    累计入库        %d 条" % n_total_new)
     L.append("    订阅源容量中位   %d 条" % rep["volume"]["median_capacity"])
     L.append("    日更新量中位     %.1f 条" % rep["volume"]["median_daily_rate"])

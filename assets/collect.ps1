@@ -23,6 +23,21 @@ $pipe = "D:\shared-skills\event-ledger-pipeline"
 $py = "D:\anaconda\python.exe"
 $reg = "C:\Users\21944\Desktop\七月恐怖事件\信源主表_可调度_20261119.xlsx"
 
+# ── 单实例锁 ──
+# 手工跑和计划任务撞车时，两个进程会抢同一个日志文件，
+# 报 "cannot access the file ... being used by another process"，
+# 那一整轮的日志就全丢了。抓取本身幂等，但日志丢了排查时什么都看不到。
+# FileShare.None 靠句柄独占，进程退出自动释放，不需要删文件。
+$lockPath = Join-Path $root "state\.collect.lock"
+try {
+    $lockHandle = [System.IO.File]::Open($lockPath, 'OpenOrCreate',
+        'ReadWrite', 'None')
+} catch {
+    "==== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 已有实例在跑，跳过 ====" |
+        Out-File -FilePath (Join-Path $root "logs\skipped.log") -Append -Encoding utf8
+    exit 0
+}
+
 $logDir = Join-Path $root "logs"
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir -Force | Out-Null }
 
@@ -100,4 +115,5 @@ if (-not $rc) { $rc = 0 }
 "==== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 结束 exit=$rc ====" |
     Out-File -FilePath $log -Append -Encoding utf8
 
+$lockHandle.Close()
 exit $rc
