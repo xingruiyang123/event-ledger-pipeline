@@ -62,13 +62,37 @@ $artArgs = @(
     "--workers", "6",
     "--timeout", "20",
     "--proxy", "http://127.0.0.1:17890",
-    "--limit", "300"
+    "--limit", "600"
 )
 & $py @artArgs 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
 $rcArt = $LASTEXITCODE
+
 if ($rc -eq 0) { $rc = $rcArt }
 
+# ── 第三步：搜索补充 ──
+# 只补「源有价值但被反爬挡住」的 P1 档（Times of Israel / MindaNews），
+# 不做全量搜索 —— 元宝 0.014 元/次，全量数千条与收益不成比例。
+# 用户 2026-11-20 的判断：「先把高价值源的搜索补充链路跑通，
+# 之后再根据实际缺失情况决定是否值得投入（代理/出口 IP）。」
+"---- 搜索补充 ----" | Out-File -FilePath $log -Append -Encoding utf8
+$supArgs = @(
+    "-W", "ignore", (Join-Path $pipe "scripts\supplement_by_search.py"),
+    "--store", $root,
+    "--search-cmd", 'D:\DSH\yb.cmd search "{q}" --cnt 10',
+    "--tiers", "P1",
+    "--sleep", "0.3"
+)
+& $py @supArgs 2>&1 | Out-File -FilePath $log -Append -Encoding utf8
+$rcSup = $LASTEXITCODE
+# 搜索补充的返回值不参与总退出码。
+# 它在「本轮没有需要补的条目」时返回 2，而那是正常状态不是故障 ——
+# 传上去会让整条流水线每轮都显示失败，反而掩盖真正的失败。
+if ($rcSup -ne 0) {
+    "  搜索补充返回 $rcSup（无新增摘要，不影响流水线）" |
+        Out-File -FilePath $log -Append -Encoding utf8
+}
 
+if (-not $rc) { $rc = 0 }
 "==== $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') 结束 exit=$rc ====" |
     Out-File -FilePath $log -Append -Encoding utf8
 
