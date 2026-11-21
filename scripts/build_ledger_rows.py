@@ -184,13 +184,22 @@ NUMWORDS = {
 # 提示词必须带词边界。
 # 不带的话「dead」会匹配到「deadline」—— 实测把
 # 「1,500 charities risk missing accounts deadline」抽成了死亡 1500 人。
+#
+# 「murdered / slain / massacred / shot dead / executed」也要收进来。
+# 实测漏例：「Seven civilians were murdered and 14 others injured」——
+# 死亡词表里没有 murdered，7 条命就丢了，只抽出受伤 14。
+# 新闻里描述恐袭常用的正是这几个词。
 DEATH_HINT = (r"(?:\bkill(?:ed|s|ing)?\b|\bdead\b|\bdeath(?:s)?\b|"
               r"\bfatalit(?:y|ies)\b|\bdied\b|\bbodies\b|\bcorpse\b|"
-              r"死亡|丧生|遇难|身亡)")
+              r"\bmurder(?:ed|s)?\b|\bslain\b|\bslay\b|\bmasacr|\bmassacr|"
+              r"\bexecuted\b|\bshot dead\b|\bburned alive\b|"
+              r"死亡|丧生|遇难|身亡|遇害|被杀|杀死)")
 INJ_HINT = (r"(?:\binjur(?:ed|es|y)?\b|\bwound(?:ed|s)?\b|\bhurt\b|"
             r"受伤|伤者|负伤)")
 
 # 这些词出现说明数字是年龄、日期或金额，不是伤亡人数。
+# （现在这套判据内联在 extract_numbers 的 ok_num 里，
+#   常量保留给别处引用，别删。）
 AGE_OR_DATE = re.compile(
     r"(?:ages?|aged|years?[\s\-]*old|yrs?[\s\-]*old|"
     r"jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec|"
@@ -266,78 +275,160 @@ def _num_from_token(tok):
 def extract_numbers(text):
     """抽死亡和受伤人数。返回 (deaths, injured, basis)。
 
-    规则比想象中难。下面每一条都来自实测错例：
+    做法改了四次，每次都是实测抽错逼出来的：
 
-    ① 数字必须紧挨提示词。正文里到处都是年份、年龄；
-       宽松匹配会把「died in 2014」抽成死亡 2014 人。
+    第一版：为「死」和「伤」各写一组正则，谁先匹配用谁。
+      错在「Seven civilians were murdered and 14 others injured」——
+      死亡正则从 murdered 往后吃到 14，抽出死亡 14。
+      而 7 才是死的，14 是伤的。
 
-    ② 「22 Indians had been killed」不算这次事件的死亡数 ——
-       那是历史背景。本次事件的死亡数通常在首段、
-       且主语是事件本身。所以只在**首段**里抽数字，
-       首段没有就留空，宁可空也不错。
+    第二版：加后处理，数字后面先出现受伤词就不算死亡。
+      疗效过头：「12 killed and 30 injured」被判成没有死亡数。
 
-    ③ 「des morts et nombreux blessés」这种不带数字的表述
-       抽不出数，就留空，不要给 0。
+    第三版：所有数字和提示词定位后，每个数字归给最近的提示词。
+      还是错——14 距 murdered 5 个字、距 injured 8 个字，
+      「最近」判给了 murdered。
 
-    ④ 数字大于 10000 一律视为误抽（单起袭击死亡过万极罕见，
-       哈萨克/非洲大屠杀除外，但那种会写「bodies」）。
+    第四版（现在）：改成**以提示词为中心**分工。
+      按出现顺序走每个提示词，先往左找最近的、未被占用的数字，
+      左边没有才往右找。这就是人读句子的顺序：
+        Seven(7) ← murdered     14 ← injured
+        killed → 12（左边没有，往右）    injured → 30
+        killed → 45（左边）
+        dead → 5（左边没有，往右）
+      四种句式全对，而且不依赖回溯运气。
+
+    数字排除规则仍然保留（都是实测错例）：
+      · 后跟 年/月/日/岁 / years old / at the age of / % / am/pm → 日期或年龄
+      · 前面是 £ $ € ¥ → 金额
+      · 形如 45-year-old → 年龄
+      · 大于 10000 → 误抽
     """
     low = text.lower()
 
-    def grab(hint):
-        # 数字前面不能是 £ $ % 或字母（"ages 18"、"oct 10" 这种）
-        pat_a = (r"(?<![\w£$€%.,])(\d{1,5}(?:,\d{3})*)"
-                 r"\s*(?:[a-z\-]+\s+){0,4}?" + hint)
-        pat_b = (hint + r"\s*(?:[a-z\-]+\s+){0,3}?(?:by\s+)?"
-                 r"(\d{1,5}(?:,\d{3})*)")
-        pat_c = (r"(\d{1,5})\s*(?:人|名)[^。，,]{0,6}?" + hint)
-        pat_d = (r"(?:造成|导致|致使)\s*(\d{1,5})\s*(?:人|名)?\s*" + hint)
-        best = None
-        for p in (pat_a, pat_b, pat_c, pat_d):
-            for m in re.finditer(p, low):
-                v = _num_from_token(m.group(1))
-                if v is None or v > 10000:
-                    continue
-                ctx = m.group(0)
-                # 年龄写法：「45-year-old man was killed」里的 45 是年龄，
-                # 不是死亡人数。实测这条抽出「死亡 45 人」。
-                if re.search(r"\d\s*[\-\s]?\s*(?:year|yr)s?\s*[\-\s]?\s*old",
-                             low[m.start():m.end() + 30]):
-                    continue
-                # 数字后面紧跟年/月/日/岁 的，是日期或年龄不是伤亡
-                if re.search(r"\d\s*(?:年|月|日|岁|years?\s+old|yrs?|"
-                             r"a\.?m\.?|p\.?m\.?|h\b|hours?\b|minutes?\b|"
-                             r"%|percent)", ctx):
-                    continue
-                # 「dead at 66」「deadly 2025」这类：数字紧跟 at/ly/of 的
-                if re.search(r"(?:at|ly|of|to|in)\s+\d", ctx):
-                    continue
-                # 年龄/日期：数字后紧跟 ages / years old / 月份
-                if AGE_OR_DATE.search(ctx.split(str(m.group(1)))[0]):
-                    continue
-                # 货币
-                if re.search(r"[£$€¥]\s*\d", ctx):
-                    continue
-                if best is None or v > best[0]:
-                    best = (v, ctx[:80])
-        words = "|".join(sorted(NUMWORDS, key=len, reverse=True))
-        m = re.search(r"\b(" + words + r"(?:\s+" + words + r")*)\s+"
-                      r"(?:[a-z\-]+\s+){0,3}?" + hint, low)
-        if m:
-            v = _num_from_token(m.group(1))
-            if v is not None and v <= 10000 \
-                    and (best is None or v > best[0]):
-                best = (v, m.group(0)[:80])
-        return best
+    # ---- 所有提示词的位置 ----
+    marks = []
+    for m in re.finditer(DEATH_HINT, low):
+        marks.append((m.start(), m.end(), "d"))
+    for m in re.finditer(INJ_HINT, low):
+        marks.append((m.start(), m.end(), "i"))
+    marks.sort()
+    if not marks:
+        return None, None, ""
 
-    d = grab(DEATH_HINT)
-    i = grab(INJ_HINT)
+    # ---- 所有候选数字 ----
+    nums = []
+    for m in re.finditer(r"(?<![\w£$€%.,])(\d{1,5}(?:,\d{3})*)", low):
+        nums.append((m.start(), m.end(), m.group(1)))
+    words = "|".join(sorted(NUMWORDS, key=len, reverse=True))
+    for m in re.finditer(r"\b((?:" + words + r")(?:\s+(?:" + words +
+                         r"))*)\b", low):
+        nums.append((m.start(), m.end(), m.group(1)))
+    nums.sort()
+
+    def ok_num(start, end):
+        tail = low[start:end + 34]
+        head = low[max(0, start - 14):start]
+        if re.search(r"\d\s*(?:年|月|日|岁)", tail):
+            return False
+        if re.search(r"\d[\s\-]*(?:year|yr)s?[\s\-]*(?:old|\b)", tail):
+            return False
+        if re.search(r"\d\s*(?:years?|yrs?)\b", tail):
+            return False
+        if re.search(r"\d\s*(?:a\.?m\.?|p\.?m\.?|h\b|hours?\b|minutes?\b|"
+                     r"%|percent)", tail):
+            return False
+        if re.search(r"at\s+the\s+age", tail):
+            return False
+        if re.search(r"\b(?:ages?|aged)\s*$", head):
+            return False
+        if re.search(r"[£$€¥]\s*$", head):
+            return False
+        if re.search(r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov"
+                     r"|dec|january|february|march|april|june|july|august"
+                     r"|september|october|november|december)\s*$", head):
+            return False
+        # ---- 后面跟的不是人 ----
+        # 「about 50 evacuated」「24 rounds fired」「1,500 charities」
+        # 都是数量不是人。伤亡人数的后面通常跟 people/civilians/soldiers
+        # 这类人称，或者什么都不跟（「45 killed」）。
+        # 若紧跟的是明显的「非人称量词」，这个数字不是伤亡。
+        after = low[end:end + 22].lstrip()
+        if re.match(r"(?i)^(?:rounds?|bullets?|shots?|vehicles?|cars?|trucks?|"
+                    r"buses?|homes?|houses?|buildings?|charities|evacuated|"
+                    r"displaced|arrested|detained|percent|per\s*cent|"
+                    r"km\b|kilomet|meters?|miles?|hectares?|tons?|litres?|"
+                    r"liters?|dollars?|euros?|pounds?|rupees?|pesos?|"
+                    r"years?\b|months?\b|weeks?\b|days?\b|hours?\b|"
+                    r"airstrikes?|strikes?|rockets?|missiles?|bombs?\b)", after):
+            return False
+        # ---- 四位数年份 ----
+        # 「since 2018」「in 2023」「the 2023 death toll」「on nov. 15, 2026」
+        # 里的数字都是年份，不是死亡人数。
+        # 实测抽出过「死亡 2023」「死亡 2009」「死亡 1998」「死亡 2026」，
+        # 共 48 条，全是这一类。
+        #
+        # 判据不是「看着像年份就丢」—— 否则「2,026 人死亡」这种
+        # 四位数伤亡也会被误杀（大规模屠杀确实能到四位数）。
+        # 所以只在**上下文有年份标记**时丢：
+        #   前面是 since/in/by/until/from/during/of/the/toll
+        #   或者前后紧邻逗号加年份数字
+        val = _num_from_token(low[start:end])
+        if val is not None and 1900 <= val <= 2100:
+            if re.search(r"(?:since|in|by|until|from|during|after|before|of|"
+                         r"early|late|mid|the|toll|year|annee|année|"
+                         r"de|du|des|en|del|el|das|im|am)\s*$",
+                         head):
+                return False
+            # 「nov. 15, 2026」这种日期串：前面的逗号加两位数
+            if re.search(r"\d{1,2}\s*,\s*$", head):
+                return False
+            if re.match(r"(?i)^\s*(?:and|to|until|-|–|/)\s*(?:19|20)\d{2}",
+                        after):
+                return False
+            # 「2023 death toll」：后面跟 toll/death/casualties 的
+            # 反而是有效的伤亡数，不丢
+        return True
+
+    used = set()
+    got = {"d": None, "i": None}
+    for ms, me, kind in marks:
+        if got[kind] is not None:
+            continue
+        pick = None
+        # 先往左
+        for s, e, raw in nums:
+            if e <= ms and ms - e <= 60 and ok_num(s, e) and (s, e) not in used:
+                pick = (s, e, raw)
+        # 左边没有再往右
+        if pick is None:
+            for s, e, raw in nums:
+                if s >= me and s - me <= 32 and ok_num(s, e) \
+                        and (s, e) not in used:
+                    pick = (s, e, raw)
+                    break
+        if pick is None:
+            continue
+        # 往回看 40 字符：命中片段里若有 at the age / aged / years old，
+        # 这个数字是年龄不是伤亡。
+        # 实测「He died in 2014 at the age of 66」——
+        # 2014 被正确排掉（年份），66 却被当成死亡数。
+        if re.search(r"(?i)(?:at\s+the\s+age\s+of|aged|years?\s+old|yrs?\s+old)"
+                     r"\s*$", low[max(0, pick[0] - 40):pick[0]]):
+            continue
+        used.add((pick[0], pick[1]))
+        v = _num_from_token(pick[2])
+        if v is None or v > 10000:
+            continue
+        got[kind] = (v, low[max(0, pick[0] - 24):pick[1] + 18])
+
     parts = []
-    if d:
-        parts.append("死亡%d ← %s" % (d[0], d[1]))
-    if i:
-        parts.append("受伤%d ← %s" % (i[0], i[1]))
-    return (d[0] if d else None), (i[0] if i else None), "；".join(parts)
+    if got["d"]:
+        parts.append("死亡%d ← %s" % (got["d"][0], got["d"][1]))
+    if got["i"]:
+        parts.append("受伤%d ← %s" % (got["i"][0], got["i"][1]))
+    return (got["d"][0] if got["d"] else None), \
+           (got["i"][0] if got["i"] else None), "；".join(parts)
 
 
 def extract_date(text, fallback_iso=""):
@@ -497,24 +588,144 @@ def make_summary(text, title=""):
     return cut.strip() + "…"
 
 
-def ledger_row(rec, gaz, today):
-    """一条正文 → 一行台账候选。"""
+def html_to_body(html):
+    """HTML → 正文，保留行边界。
+
+    这里有个必须说清的顺序问题。原来走的是「去标签 + 把连续空白压成一个空格」，
+    结果整页变成一整行，**首段就是页头的导航**：
+
+      | Environment | News Hi Subscribe Activate Manage eEdition Sign In Sign Out
+      99&cent; for 6 mos Support local journalism.
+
+    死亡人数从首段抽，首段是导航栏，所以什么都抽不到 ——
+    14,899 篇里只有 563 篇（4%）有死亡数字，不是新闻里没写，是根本没读到正文。
+
+    正确顺序：
+      ① 标签换成**换行**而不是空格，保住段落边界
+      ② 丢掉 <script>/<style>/<nav>/<footer>/<header>/<aside>
+      ③ 按行长和字符集筛掉导航行（短行、全是竖线分隔、菜单词）
+      ④ 剩下的行里找**最长连续块**，那才是正文
+
+    不做通用正文抽取器（readability 那类）：小语种地方媒体上经常抽空，
+    而且引进来要装依赖，违背「任何人的机器上都能跑」的前提。
+    """
+    t = re.sub(r"(?is)<(script|style|nav|footer|header|aside|form|"
+               r"noscript|iframe|svg)[^>]*>.*?</\1>", " ", html or "")
+    t = re.sub(r"(?s)<!--.*?-->", " ", t)
+    # 段落级标签先转换行，行内标签转空格 —— 这样 <p> 之间才断得开
+    t = re.sub(r"(?i)</?(?:p|div|br|li|tr|h[1-6]|article|section|blockquote)\b[^>]*>",
+               "\n", t)
+    t = re.sub(r"(?s)<[^>]+>", " ", t)
+    t = (t.replace("&nbsp;", " ").replace("&amp;", "&")
+         .replace("&quot;", '"').replace("&#39;", "'")
+         .replace("&lt;", "<").replace("&gt;", ">")
+         .replace("&cent;", "c").replace("&hellip;", "…"))
+    t = re.sub(r"&[a-z]{2,8};", " ", t)
+
+    lines = []
+    for raw in t.split("\n"):
+        s = re.sub(r"\s+", " ", raw).strip()
+        if len(s) < 30:
+            continue
+        # 竖线/斜杠堆起来的行是导航条
+        if s.count("|") >= 3 or s.count("»") >= 2:
+            continue
+        # 菜单词密度太高
+        low = s.lower()
+        nav_hits = sum(1 for w in NAV_WORDS if w in low)
+        if nav_hits >= 3:
+            continue
+        # 没有句读符号、字数又少的，多半是标签墙
+        if not re.search(r"[.。!?！？;；:：,，]", s) and len(s) < 80:
+            continue
+        lines.append(s)
+    if not lines:
+        return ""
+
+    # 找最长连续块：正文段落彼此相邻，导航区是碎片
+    best_s, best_len, cur_s, cur_len = 0, 0, 0, 0
+    for i, s in enumerate(lines):
+        if cur_len == 0:
+            cur_s = i
+        cur_len += len(s)
+        if i + 1 == len(lines) or len(lines[i + 1]) < 60:
+            if cur_len > best_len:
+                best_s, best_len = cur_s, cur_len
+            cur_len = 0
+    body = lines[best_s:]
+    # 从最优块起点往后取，遇到连续短行就收尾
+    out = []
+    for s in body:
+        if out and len(s) < 60:
+            break
+        out.append(s)
+    return "\n\n".join(out or body)
+
+
+# 导航/菜单常见词。只用来统计行内密度，不做匹配规则。
+NAV_WORDS = (
+    "subscribe", "sign in", "sign up", "log in", "login", "register",
+    "newsletter", "advertise", "contact us", "privacy", "terms",
+    "cookie", "menu", "search", "home", "about us", "careers",
+    "e-edition", "eedition", "activate", "manage", "sign out",
+    "skip to", "back to top", "share", "follow us", "download",
+    "订阅", "登录", "注册", "首页", "关于我们", "联系我们", "广告",
+)
+
+
+def pick_lead(body, title=""):
+    """从正文里取「首段」—— 第一段有实质内容的。
+
+    跳过：标题重复（正文常把标题再写一遍）、
+          纯来源署名（「By X | Nov 20, 2026」）、
+          过短的句子。
+    """
+    if not body:
+        return ""
+    tl = (title or "").strip().lower()
+    for para in re.split(r"\n\n+", body):
+        s = para.strip()
+        if len(s) < 60:
+            continue
+        if tl and s.lower().startswith(tl[:40]):
+            s = s[len(tl):].strip(" |-–—:")
+            if len(s) < 60:
+                continue
+        # 署名行
+        if re.match(r"(?i)^(by\s+\S+|posted\s+|updated\s+|published\s+)", s) \
+                and len(s) < 120:
+            continue
+        return s
+    return body[:800]
+
+
+def ledger_row(rec, gaz, today, template=None):
+    """一条正文 → 一行台账候选。
+
+    template: {站点: 该站的模板地名}，来自 detect_template_places.py。
+    命中说明这个地名是站点模板（页脚/侧栏），不是文章讲的地方，
+    该站这一篇的地点与国家对判定作废 —— 宁可留空，不要错填。
+    """
     text = rec.get("text") or ""
     title = rec.get("title") or ""
     body = (title + "\n\n" + text) if title else text
+
+    # 这个站的模板地名
+    host = ""
+    m = re.match(r"https?://([^/]+)", rec.get("url") or "")
+    if m:
+        host = m.group(1).lower()
+        if host.startswith("www."):
+            host = host[4:]
+    tpl_place = (template or {}).get(host, {}).get("place", "") if template else ""
 
     # 伤亡数字只从首段抽。
     # 全文抽会把「died in 2014」「22 Indians had been killed」这种
     # 历史背景当成这次事件的死亡数 —— 实测抽出了「死亡 2014 人」
     # 和「死亡 22 人」两条明显错误。
-    head = text[:1500]
-    lead_para = ""
-    for para in re.split(r"(?<=[。.!?])\s+|\n\n", head):
-        if len(para.strip()) >= 60:
-            lead_para = para
-            break
+    lead_para = pick_lead(text, title)
     if not lead_para:
-        lead_para = head
+        lead_para = text[:1500]
 
     deaths, injured, nbasis = extract_numbers(lead_para)
     y, mo, d, dbasis = extract_date(text, rec.get("published") or "")
@@ -571,6 +782,18 @@ def ledger_row(rec, gaz, today):
             bits.append(a1)
         place_str = "，".join(x for x in bits if x)
 
+    # 站点模板地名：这一篇判出的地点就是该站所有文章都命中的那个，
+    # 说明它是页脚/侧栏里的词，不是文章讲的地方。
+    # 处理是「整篇的地点与国家作废」，不是「换成别的地点」——
+    # 换就等于猜，猜出来的国家会污染下游统计。
+    if tpl_place and place_str and place_str == tpl_place:
+        place_str = ""
+        country = ""
+        country_zh = ""
+        _tpl_dropped = True
+    else:
+        _tpl_dropped = False
+
     act = _find_act(body)
     weapon = _find_weapon(body)
     group = _find_group(body)
@@ -613,7 +836,9 @@ def ledger_row(rec, gaz, today):
         "置信度": conf,
         "审核状态": "待审",
         "关联知识点": "",
-        "备注": "｜".join(x for x in (nbasis, dbasis) if x)[:200],
+        "备注": "｜".join(x for x in (nbasis, dbasis,
+                                   "站点模板地名已剔除" if _tpl_dropped else "")
+                        if x)[:200],
     })
     return row, score
 
@@ -624,13 +849,28 @@ def main():
     ap.add_argument("--gazetteer", default=None)
     ap.add_argument("--out", default="")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--template-places", default="",
+                    help="detect_template_places.py 的输出；剔除站点模板地名")
     ap.add_argument("--min-score", type=int, default=0,
                     help="只要要素齐全度达到此值的行")
+    ap.add_argument("--no-prefilter", action="store_true",
+                    help="不做标题初筛，全部文章都抽（默认做）")
+    ap.add_argument("--only-attack", action="store_true",
+                    help="只输出标题命中袭击词的文章（更严，用于人工核）")
     ap.add_argument("--json", action="store_true")
     a = ap.parse_args()
 
     import place_match as PM
+    import fetch_articles as FETCH
     gaz = PM.Gazetteer(a.gazetteer) if a.gazetteer else PM.Gazetteer()
+
+    template = {}
+    if a.template_places and os.path.isfile(a.template_places):
+        try:
+            t = json.load(io.open(a.template_places, encoding="utf-8"))
+            template = t.get("templates") or {}
+        except Exception:  # noqa: BLE001
+            template = {}
 
     import gzip
     import glob
@@ -642,7 +882,7 @@ def main():
         files = files[:a.limit]
 
     rows = []
-    n_read = n_text = 0
+    n_read = n_text = n_skip = 0
     for p in files:
         try:
             m = json.load(io.open(p, encoding="utf-8"))
@@ -650,6 +890,21 @@ def main():
             continue
         if m.get("kind") != "article":
             continue
+        # ---- 标题初筛 ----
+        # 这一层必须做，否则台账里会混进「Raiders list 3 starters as
+        # questionable」「Magnitude 4.4 earthquake strikes」这类文章。
+        # 实测：不做初筛时 14,680 行里绝大多数跟袭击无关，
+        # 只因为它们恰好提到某个地名就被判了国家。
+        #
+        # 词表复用 fetch_articles.KW —— 多语种，已经在十几万条
+        # 条目上跑过。三个来源都看（标题、摘要、URL slug），
+        # 因为 sitemap 来的条目常常没有标题。
+        if not a.no_prefilter:
+            hits = FETCH.looks_like_attack(
+                m.get("title") or "", "", m.get("url") or "")
+            if not hits:
+                n_skip += 1
+                continue
         n_read += 1
         text = m.get("text") or ""
         if not text:
@@ -661,26 +916,26 @@ def main():
                 raw = gzip.open(fp, "rb").read().decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 continue
-            # 粗暴去标签。真正的正文抽取由 extract_article_fields 负责，
-            # 这里只是兜底 —— 没有正文就无法抽事件。
-            b = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
-            b = re.sub(r"(?s)<[^>]+>", " ", b)
-            text = re.sub(r"\s+", " ", b)
+            # 正文抽取在这里做，不用简单的「去标签压空白」。
+            # 那种做法会把整页压成一行，首段变成页头导航，
+            # 后面所有按段落的判断全废（见 html_to_body 的说明）。
+            text = html_to_body(raw)
         if len(text) < 200:
             continue
         n_text += 1
         rec = {"url": m.get("url"), "final_url": m.get("final_url"),
                "title": m.get("title"), "published": m.get("published"),
                "text": text[:20000]}
-        row, score = ledger_row(rec, gaz, today)
+        row, score = ledger_row(rec, gaz, today, template)
         if score < a.min_score:
             continue
         row["_score"] = score
         rows.append(row)
 
     print("")
-    print("  读过 meta %d 篇 ｜ 有正文 %d 篇 ｜ 产出候选行 %d" %
-          (n_read, n_text, len(rows)))
+    print("  初筛（标题无袭击词）剔除 %d 篇 ｜ 进入抽取 %d 篇 ｜ 有正文 %d 篇"
+          % (n_skip, n_read, n_text))
+    print("  产出候选行 %d" % len(rows))
     print("")
 
     if rows:

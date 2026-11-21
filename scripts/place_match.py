@@ -127,6 +127,26 @@ def _open_any(path):
     return io.open(path, encoding="utf-8")
 
 
+# 允许出现在地名前面的「大写词」—— 这些是功能词，不是人名的一部分。
+# 判据只有一条：这个词在正文里经常紧挨着地名出现（in / from / near / at…），
+# 而人名前面的词是名字本身。
+CAPITALIZED_STOP = {
+    "in", "at", "from", "near", "of", "to", "the", "a", "an", "and", "or",
+    "on", "by", "for", "with", "into", "over", "under", "across", "outside",
+    "inside", "around", "via", "off", "as", "after", "before", "during",
+    "since", "until", "against", "between", "within", "through", "toward",
+    "towards", "along", "beyond", "behind", "beside", "among", "amid",
+    "north", "south", "east", "west", "northern", "southern", "eastern",
+    "western", "central", "upper", "lower", "new", "old", "greater",
+    "said", "says", "told", "reported", "including", "especially",
+    "particularly", "meanwhile", "however", "but", "also", "then",
+    "january", "february", "march", "april", "may", "june", "july",
+    "august", "september", "october", "november", "december",
+    "monday", "tuesday", "wednesday", "thursday", "friday",
+    "saturday", "sunday",
+}
+
+
 def has_cjk(s):
     return bool(re.search(r"[\u3400-\u9fff]", s))
 
@@ -240,19 +260,41 @@ class Gazetteer:
             t = toks[i][1]
             if not t[:1].isupper():
                 continue
-            # 句首一个大写词不算证据：英文正文里每句话第一个词都大写，
-            # 而「Sochi」「Soci」这类词在句首就是普通-looking 的大写词。
-            # 只有当这个词后面紧跟介词/动词时才可能是地名，
-            # 简化处理：跳过紧跟在句号、冒号、引号后面的大写词。
-            if i == 0 or text[:toks[i][0]].rstrip()[-1:] in ".!?:»\"'":
+            # 句首的大写词要不要算证据，分两种情况：
+            #   · 单字命中：跳过。英文每句第一个词都大写，
+            #     「Sochi」「Soci」这种在句首就是普通的大写词，跳掉最稳。
+            #   · 多词命中（Port Said、New Delhi、Sao Paulo）：保留。
+            #     实测漏例：「Port Said was hit by a blast」——
+            #     Port 在句首被跳过，整条地名就没了。
+            #     多词地名不是普通英文句子会碰巧凑出来的。
+            at_sentence_start = False
+            if i == 0:
+                at_sentence_start = True
+            else:
                 prev = text[:toks[i][0]].rstrip()
-                if not prev or prev[-1:] in ".!?:»\"'":
-                    continue
+                if prev and prev[-1:] in ".!?:\"»'":
+                    at_sentence_start = True
             for k in range(1, min(self.max_words, n - i) + 1):
                 key = " ".join(lows[i:i + k])
                 ents = self.by_form.get(key)
                 if not ents:
                     continue
+                if k == 1 and at_sentence_start:
+                    continue
+                # 单字命中时，若前一个词也是大写开头，多半是人名/品牌名的一部分。
+                # 实测：「Lockheed Martin to manufacture ExLS naval missile
+                # launchers」被判成斯洛伐克城市「马丁」（Martin）——
+                # 372 篇美军装备报道全被算到斯洛伐克头上。
+                # 同类的还有 Martin Luther King、George Bush 之类。
+                # 双词以上的命中（New Delhi、Port Said）不受这条限制，
+                # 因为它们是整体查表查出来的。
+                if k == 1 and i > 0:
+                    prev = toks[i - 1][1]
+                    if (prev[:1].isupper()
+                            and prev.lower() not in CAPITALIZED_STOP):
+                        gap = text[toks[i - 1][0] + len(prev):toks[i][0]]
+                        if not gap.strip():
+                            continue
                 s = toks[i][0]
                 en = toks[i + k - 1][0] + len(toks[i + k - 1][1])
                 for e in ents:
