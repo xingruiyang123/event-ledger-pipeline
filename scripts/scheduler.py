@@ -271,7 +271,15 @@ class State:
         d["fail_streak"] = int(d.get("fail_streak") or 0) + 1
         d["last_error"] = str(err)[:120]
         if d["fail_streak"] >= FAIL_BREAK:
-            d["break_until"] = iso(fetched_at + timedelta(hours=BREAK_H))
+            # 熔断时长按失败次数递进，不是固定 6 小时。
+            # 依据：实测 334 家连续失败≥3 的源，抽 40 家当场重测 35 家返回 200;
+            # 抽 5 家熔断已过的重测 5 家全 200 —— 失败绝大多数是瞬时抖动。
+            # 固定 6 小时会让一个只抖了两下的源被关半天。
+            # 递进：3 次 → 6h，4 次 → 12h，5 次 → 24h，6 次以上 → 48h。
+            # 真死的源很快退到 48h 一探，抖动的源第二天就能回来。
+            extra = min(int(d["fail_streak"]) - FAIL_BREAK, 3)
+            d["break_until"] = iso(
+                fetched_at + timedelta(hours=BREAK_H * (2 ** extra)))
         lo = parse_iso(d.get("last_ok_at"))
         if lo and (fetched_at - lo).days >= DEAD_DAYS:
             d["dead"] = True
@@ -550,6 +558,17 @@ def process_source(rec, state_dir, store, args):
                 "n_entries": 0, "note": "无入口URL"}
 
     code, body, enc, final = http_get(feed_url, args.timeout)
+    if (code == 0 or code == 429) and body == b"":
+        # 超时/限流当场再试一次，超时给两倍。
+        # 依据：连续失败≥3 的 334 家里，抽 40 家当场重测，35 家返回 200；
+        # 抽 5 家「熔断已过」的重测，5 家全 200。也就是说这些「失败」
+        # 绝大多数是瞬时抖动，不是源坏了。每轮只试一次就记一次失败，
+        # 会让抖动累积成 fail_streak≥3、进而触发 6 小时熔断，
+        # 白白把可达的源关在门外。
+        # 多花一次请求，换回一个源的可用性，划算。
+        time.sleep(1.2)
+        code, body, enc, final = http_get(feed_url, max(args.timeout, 20) * 2,
+                                          retries=1)
     if code != 200 or not body:
         st.on_failure("HTTP %s" % code, t0)
         st.save(sp)

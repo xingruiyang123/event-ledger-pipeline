@@ -46,6 +46,24 @@ def load_states(state_dir):
     return out
 
 
+def _latest_round():
+    """读调度器最近一轮的 report_*.json，取本轮的 due/ok。
+
+    为什么报告要读它：状态库里的 fail_streak 是**跨时间**留下的，
+    而「本轮尝试成功率」才是当前这一刻的健康度。两个数字差得远时，
+    光看状态库会误判成「网络挂了」。
+    """
+    import glob as _g
+    pats = _g.glob(r"D:\event-ledger-data\logs\report_*.json")
+    if not pats:
+        return None
+    pats.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    try:
+        return json.load(io.open(pats[0], encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def classify_error(e):
     e = str(e or "")
     if e.startswith("HTTP 0") or "Timeout" in e or "Connection" in e:
@@ -80,9 +98,34 @@ def main():
     dead = [j for j in st if j.get("dead")]
     # 容量告警只对「至少抓过两轮」的源算 —— 首次抓取所有条目都是新的，
     # n_new == capacity 是基线建立，不是溢出风险。
+    #
+    # 判据必须和调度器用同一套公式，否则两边永远对不上。
+    # 这里原来是 last_n_new >= capacity*0.6，意思是「这次抓到的有六成是新的」，
+    # 但那衡量的是**换手率**，不是**有没有丢**：
+    #   6abc.com 容量 20、日更 56.6、间隔 4.2h → 每轮应有 9.9 条新增，
+    #   实测 14 条是新的，占 70%，触发告警 —— 可它一轮只来 9.9 条，
+    #   离装不下还差一倍。按这个口径报了 126 家，实际会丢的是 0 家。
+    # 正确判据：一个间隔周期内到达的条数 ÷ 容量。超过 1 才是真丢，
+    # 超过 0.6 是安全余量不足（调度器的 CAPACITY_WARN）。
+    # 未来 24 小时内到期的：按每源的 safe_interval 估算
+    # （这个函数必须定义在容量告警之前 —— fill_ratio 要用它）
+    def interval_of(j):
+        cap = j.get("capacity") or 0
+        r = j.get("rate") or 0
+        if cap <= 0 or r <= 0:
+            return 6.0
+        return max(1.0, min(72.0, (cap / (r / 24.0)) * 0.5))
+
+    def fill_ratio(j):
+        cap = float(j.get("capacity") or 0)
+        rate = float(j.get("rate") or 0)
+        if cap <= 0:
+            return 0.0
+        iv = interval_of(j)
+        return (rate / 24.0 * iv) / cap
+
     warn = [j for j in ok
-            if int(j.get("n_fetches") or 0) > 1
-            and (j.get("last_n_new") or 0) >= (j.get("capacity") or 1) * 0.6]
+            if int(j.get("n_fetches") or 0) > 1 and fill_ratio(j) > 0.6]
 
     # 增量必须区分「首轮基线」和「真实新增」。
     # 首轮抓取时 n_new == capacity（全部条目都是新的），那不是增量，是基线。
@@ -95,14 +138,6 @@ def main():
     n_total_new = sum(j.get("n_new_total") or 0 for j in st)
     caps = sorted(j.get("capacity") or 0 for j in ok if j.get("capacity"))
     rates = sorted(j.get("rate") for j in ok if j.get("rate"))
-
-    # 未来 24 小时内到期的：按每源的 safe_interval 估算
-    def interval_of(j):
-        cap = j.get("capacity") or 0
-        r = j.get("rate") or 0
-        if cap <= 0 or r <= 0:
-            return 6.0
-        return max(1.0, min(72.0, (cap / (r / 24.0)) * 0.5))
 
     due24 = 0
     for j in st:
@@ -171,8 +206,26 @@ def main():
     L.append("    信源状态库      %d 家" % len(st))
     L.append("    最近一次成功     %d 家 ｜ 失败 %d 家 ｜ 标记死源 %d 家"
              % (len(ok), len(bad), len(dead)))
-    L.append("    成功率          %.1f%%%s" % (
-        rate_ok, "" if rate_ok >= 80 else "   ← 低于 80%，先查网络与代理"))
+    # 「成功率」有两种算法，差异很大，必须分清，否则会得出错误结论。
+    #
+    #   本轮尝试成功率  本次调度实际跑到的源里成功几成   ← 真实健康度
+    #   状态库成功率    1090 个源里「上一次尝试成功」的比例
+    #
+    # 后者会被**不同时间点的陈旧失败**拉低：一个源三天前超时一次，
+    # 之后按 72 小时间隔还没轮到第二次，fail_streak 就一直挂着 1。
+    # 实测过：本轮 302/309 = 97.7%，状态库却报 69.1%；
+    # 抽查 14 个「失败」源当场重试，13 个返回 200 —— 全是瞬时抖动，不是坏了。
+    latest = _latest_round()
+    if latest and latest.get("due"):
+        L.append("    本轮尝试成功率    %.1f%%（%d/%d）"
+                 % (100.0 * latest["ok"] / latest["due"],
+                    latest["ok"], latest["due"]))
+    L.append("    状态库成功率     %.1f%%%s" % (
+        rate_ok, "" if rate_ok >= 80
+        else "   ← 含各时间点的陈旧失败，不等于当前故障率"))
+    n_break = len([j for j in bad if int(j.get("fail_streak") or 0) >= 3])
+    if n_break:
+        L.append("    连续失败≥3 熔断中 %d 家   ← 这批才是真需要处理的" % n_break)
     L.append("")
     L.append("  ── 二、解析层：抓到的是 feed 吗 ──")
     n_parse = errs.get("入口不是feed", 0)
