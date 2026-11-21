@@ -76,21 +76,45 @@ FETCH = None
 
 
 def build_query(domain, days=2):
-    """只查站点 + 时间窗，**不拼关键词**。
+    """Bing News RSS —— 它给的是**原文 URL**，Google 不给。
 
-    Google News 的 q 是语义匹配不是布林表达式。实测把
-    「(attack OR bombing OR killed OR militant OR terror …)」拼进去之后，
-    返回的还是一整站的最新 100 条 —— 里面有比特币新闻、体育新闻、
-    Jimmy Kimmel 的段子，跟袭击毫无关系。Google 把那些词当成了
-    「话题倾向」而不是过滤条件。
+    两条聚合通道的实测差异（2026-11-21）：
 
-    所以正确做法是：先无条件拿站点最新条目，再用本地词表过滤标题。
-    本地词表和正文层初筛用的是同一套（fetch_articles.KW），
-    多语种、已经过实测，比让 Google 猜要可靠。
+      Google News RSS   site:xxx 能拿 100 条标题，但链接是
+                        news.google.com/rss/articles/<base64>，
+                        跟到底还是 Google 自己的页面，解不出原文。
+                        三种解码都试过：base64 里没有明文 URL、
+                        302 跳回自己、batchexecute 返回 null。
+      Bing News RSS     site:xxx 拿 12 条，链接是
+                        bing.com/news/apiclick.aspx?...&url=<原文URL>，
+                        跟一次 302 就落到原文页，**能拿到原文 URL**。
+
+    所以走 Bing。Bing 只给 12 条，但给的是真链接 ——
+    台账里必须存原文 URL，这一条更重要。
     """
-    q = "site:%s when:%dd" % (domain, days)
-    return "https://news.google.com/rss/search?q=%s&hl=en" % (
-        urllib.parse.quote(q))
+    q = "site:%s" % domain
+    return ("https://www.bing.com/news/search?q=%s&format=rss"
+            % urllib.parse.quote(q))
+
+
+def unwrap_bing(link):
+    """把 bing 的 apiclick 链接拆成原文 URL。
+
+    URL 就在查询参数的 url= 里，不用发请求就能解出来。
+    实测解出来的形如
+      https://www.vanguardngr.com/2026/11/tinubus-re-election...
+    跟一次 302 也确认落到同一个地址。
+    """
+    if not link:
+        return ""
+    if "bing.com/news/apiclick" not in link:
+        return link
+    try:
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(link).query)
+        u = (qs.get("url") or [""])[0]
+        return u or ""
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def main():
@@ -138,14 +162,19 @@ def main():
             continue
         ents = S.parse_feed(body)
         # 用本地袭击词表过标题。词表来自 fetch_articles.KW ——
-        # 多语种、已经在十几万条条目上跑过，比让 Google 猜关键词可靠。
+        # 多语种、已经在十几万条条目上跑过，比让搜索引擎猜关键词可靠。
         kept = []
         for e in ents:
             t = (e.get("title") or "").strip()
             if not t or BAD_TITLE.match(t):
                 continue
+            real = unwrap_bing(e.get("link") or "")
+            if not real:
+                continue
             if not FETCH.looks_like_attack(t, "", ""):
                 continue
+            e = dict(e)
+            e["real_url"] = real
             kept.append(e)
         n_ok += 1
         n_item += len(kept)
@@ -153,16 +182,19 @@ def main():
             rows.append({
                 "domain": dom,
                 "title": e.get("title"),
-                "link": e.get("link"),
+                # 存原文 URL，不是 bing 的跳转链接 ——
+                # 台账里「信息来源URL」必须是能直接打开的原文地址
+                "link": e.get("real_url"),
+                "agg_link": e.get("link"),
                 "published": e.get("published"),
                 "fetched_at": S.iso(),
                 "query": url,
                 "source_type": "aggregator",
-                "engine": "google_news_rss",
-                # 关键：这条记录只能证明「Google 索引到了这条标题」，
-                # 不能当正文证据。字段显式标出来，下游不能混用。
+                "engine": "bing_news_rss",
+                # 能力边界：本通道给到的是「标题 + 原文 URL」，
+                # 没有摘要正文。正文要另走正文层去抓。
                 "evidence_kind": "title_only",
-                "note": "原文被 401/403 挡住；本通道只做发现，不做证据",
+                "note": "原站 feed 被 401/403 挡住；经聚合通道发现，正文需另行抓取",
             })
         print("  %3d/%d  %-26s %d 条" % (i, len(need), dom[:24], len(kept)))
         time.sleep(a.sleep)

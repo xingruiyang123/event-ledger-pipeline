@@ -161,7 +161,13 @@ def main():
         r = probe(s, x["domain"], FAST, a.timeout)
         if not r["kind"] and not a.skip_slow:
             r = probe(s, x["domain"], SLOW, a.timeout)
-        r.update(x)
+        # r.update(x) 会把 x 里的 url 覆盖掉探到的入口地址 ——
+        # x 的 url 是站点根，探到的是 /sitemap.xml 之类。
+        # 结果 12 家「可用」全显示成 https://域名，回头验证时
+        # 打开的是首页，看起来像 100% 假阳性。改成按字段合并。
+        for k, v in x.items():
+            if k not in ("url", "kind", "items"):
+                r[k] = v
         return r
 
     with ThreadPoolExecutor(max_workers=a.workers) as ex:
