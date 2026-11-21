@@ -255,6 +255,11 @@ class State:
         d["fail_streak"] = 0
         d["break_until"] = None
         d["dead"] = False
+        # 成功时必须清掉上一次的错误。
+        # 不清的后果实测到了：24 家源已经恢复正常并在抓，
+        # 但 last_error 还留着「解析无条目」，监控仍把它们算进
+        # 「入口不是 feed」失败组 —— 看起来一堆源坏了，其实早好了。
+        d.pop("last_error", None)
         d["n_fetches"] = int(d.get("n_fetches") or 0) + 1
         d["n_new_total"] = int(d.get("n_new_total") or 0) + n_new
         d["last_n_new"] = n_new
@@ -456,21 +461,43 @@ def parse_feed(raw):
         # 这里把两种都解析出来，由调用方判断要不要展开子 sitemap。
         is_index = "<sitemapindex" in low
         tag = "sitemap" if is_index else "url"
-        for m in re.finditer(r"<%s>(.*?)</%s>" % (tag, tag), txt, re.S | re.I):
-            blk = m.group(1)
-            loc = re.search(r"<loc>(.*?)</loc>", blk, re.S | re.I)
-            lm = re.search(r"<lastmod>(.*?)</lastmod>", blk, re.S | re.I)
-            if not loc:
+
+        # 标准写法把链接装在 <loc> 里
+        locs = [_text(x) for x in
+                re.findall(r"<loc>(.*?)</loc>", txt, re.S | re.I)]
+        lastmods = [_text(x) for x in
+                    re.findall(r"<lastmod>(.*?)</lastmod>", txt, re.S | re.I)]
+
+        if not locs:
+            # 非标准写法：<url> 里直接套链接文本，没有 <loc>。
+            # 实测 lse.ac.uk/sitemap.xml 就是这样：
+            #   <url> <url>https://www.lse.ac.uk/</url> <lastmod/> </url>
+            # 外层和内层同名，非贪婪匹配会把内层当成外层的结束，
+            # 于是 <loc> 一条都找不到、整份 10000 条全被判成解析无条目。
+            # 直接抓最内层那种「开标签紧跟链接文本」的形态。
+            pat_inner = r"<%s>\s*(https?://[^<\s]+)\s*</%s>" % (tag, tag)
+            locs = re.findall(pat_inner, txt, re.I)
+
+        for i, link in enumerate(locs):
+            if not link:
                 continue
-            link = _text(loc.group(1))
             out.append({"id": link, "title": "", "link": link,
-                        "published": _text(lm.group(1)) if lm else "",
+                        "published": lastmods[i] if i < len(lastmods) else "",
                         "summary": "",
                         "sitemap_index": is_index})
         return out
 
     # RSS / Atom
-    pat = r"<item[^>]*>(.*?)</item>" if "<item" in low else r"<entry[^>]*>(.*?)</entry>"
+    # 用全文计数代替「前 2000 字符里有没有 <item>」：
+    # 实测 evnreport.com 的 feed 有 1.6 MB，前 2000 字符全是 channel 头，
+    # 一个 <item> 都没有 —— 于是被判成 Atom，跑去匹配 <entry>，结果 0 条。
+    # 大站的全文 feed 都会踩这个坑。
+    n_item = len(re.findall(r"<item[^>]*>", txt, re.I))
+    n_entry = len(re.findall(r"<entry[^>]*>", txt, re.I))
+    if not n_item and not n_entry:
+        return out
+    pat = (r"<item[^>]*>(.*?)</item>" if n_item >= n_entry
+           else r"<entry[^>]*>(.*?)</entry>")
     for m in re.finditer(pat, txt, re.S | re.I):
         blk = m.group(1)
         g = lambda t: (re.search(r"<%s[^>]*>(.*?)</%s>" % (t, t), blk, re.S | re.I)
@@ -481,12 +508,13 @@ def parse_feed(raw):
             link = lm.group(1) if lm else ""
         guid = _text(g("guid")) or _text(g("id")) or link
         pub = _text(g("pubDate")) or _text(g("published")) or _text(g("updated"))
+        summ = _text(g("description")) or _text(g("summary"))
         out.append({
             "id": guid or link,
             "title": _text(g("title")),
             "link": link,
             "published": pub,
-            "summary": _text(g("description")) or _text(g("summary"))[:400],
+            "summary": summ[:400],
         })
     return out
 
