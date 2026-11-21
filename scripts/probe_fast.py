@@ -57,13 +57,31 @@ def get(session, url, timeout):
 
 
 def looks_feed(body):
-    """判断响应体是不是 feed/sitemap。"""
-    head = body[:3000]
-    if SITEMAP.search(head):
+    """判断响应体是不是 feed/sitemap。
+
+    必须在**整个响应体**里找标记，不能只看前 3000 字节。
+    实测教训：首页 HTML 的 <head> 里常有 <link rel="alternate"
+    type="application/rss+xml">；如果站点还用了 <urlset> 这类
+    微数据或 JSON-LD，SITEMAP 正则就会在 HTML 里命中，
+    把整个首页判成 sitemap。
+
+    这次就是这么错的：404 家全量重探报出「可用 12 家」，
+    逐个打开看 **12 家全是首页 HTML**（bolnews / yahoo /
+    alsumaria / un.org / heraldscotland …），items 却报 0 条。
+    假阳性率 100%。
+
+    正确做法：HTML 一律先排除，再看有没有真实条目。
+    """
+    head = body[:4000].lower()
+    if b"<!doctype html" in head or b"<html" in head[:400]:
+        return ""
+    if SITEMAP.search(body[:20000]):
         return "sitemap"
-    if b"<rss" in head.lower() or b"<feed" in head.lower() or b"<rdf" in head.lower():
-        return "rss"
-    n = len(ITEM.findall(head))
+    if (b"<rss" in head or b"<feed" in head or b"<rdf" in head
+            or b"<?xml" in head):
+        # 有 xml 声明但一条条目都没有的，也不是能用的入口
+        return "rss" if len(ITEM.findall(body)) >= 2 else ""
+    n = len(ITEM.findall(body[:20000]))
     return "rss" if n >= 2 else ""
 
 
