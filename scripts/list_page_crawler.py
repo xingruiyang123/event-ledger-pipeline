@@ -201,19 +201,24 @@ def crawl_site(sess, item, timeout, max_pages=3, min_score=4):
 
     pages = [base]
     # 栏目页只在首页拿不到足够候选时才试，省请求
-    tried_host_fail = False
     all_links = []
+    first_status = 0
+    sec_status = []
     for i, pg in enumerate(pages):
         try:
             r = sess.get(pg, timeout=timeout, verify=False,
                          allow_redirects=True)
             rec["pages_tried"] += 1
         except Exception as e:  # noqa: BLE001
-            rec["reason"] = "CONN_FAIL:" + type(e).__name__
-            tried_host_fail = True
-            break
+            # 首页连不上才算 CONN_FAIL；栏目页连不上不算
+            if not first_status and i == 0:
+                rec["reason"] = "CONN_FAIL:" + type(e).__name__
+            continue
+        if i == 0:
+            first_status = r.status_code
+        else:
+            sec_status.append(r.status_code)
         if r.status_code >= 400:
-            rec["reason"] = "HTTP_%d" % r.status_code
             continue
         html = r.text or ""
         if len(html) < 2000:
@@ -239,8 +244,21 @@ def crawl_site(sess, item, timeout, max_pages=3, min_score=4):
         seen.add(key)
         uniq.append(u)
     rec["candidates"] = uniq[:300]
+    rec["http"] = first_status
+    rec["sec_http"] = sec_status[:5]
     if not rec["reason"]:
-        rec["reason"] = "OK" if uniq else "NO_LINKS"
+        # 归因只按**首页**状态来写。
+        # 之前每一页都写一次 reason，结果首页 200、栏目页 404 的站
+        # 被标成 HTTP_404 —— 实测 136 家「404」里 sabanew.net、
+        # english.news.cn 手工一开都是 200，全是这么错标的。
+        if first_status == 0:
+            rec["reason"] = "CONN_FAIL"
+        elif first_status >= 400:
+            rec["reason"] = "HTTP_%d" % first_status
+        elif uniq:
+            rec["reason"] = "OK"
+        else:
+            rec["reason"] = "NO_LINKS"
     return rec
 
 

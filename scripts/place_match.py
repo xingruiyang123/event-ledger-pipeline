@@ -93,6 +93,17 @@ STOP_NAMES = {
     "forces", "border", "region", "province", "district", "county",
     "state", "afghan", "pakistani", "indian", "american", "british",
     "french", "russian", "chinese", "turkish", "saudi", "iranian",
+    # 大洲/大区名。GeoNames 把这些当真别名挂到了具体条目上：
+    #   Mahdia（突尼斯城市）的别名里有 "Africa"
+    #   Sahel（布基纳法索一级行政区）的别名就是 "Sahel"
+    #   Central / East / West / North / South 是一堆国家的行政区名
+    # 实测后果：semafor.com 的正文页脚有导航词 "Africa"，
+    # 855 篇文章里 731 篇被判成「突尼斯·马赫迪耶」——
+    # 而它们讲的是加沙、乌克兰、拜登竞选。
+    "africa", "asia", "europe", "america", "americas", "oceania",
+    "antarctica", "eurasia", "sahel", "balkans", "caucasus",
+    "maghreb", "levant", "caribbean", "world", "global",
+    "international", "online", "today", "times", "news",
 }
 
 # 拉丁词：允许词内带撇号、连字符、变音符号。
