@@ -119,6 +119,8 @@ def unwrap_bing(link):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--in", dest="inp", default="",
+                    help="归因文件（diagnose_no_entry.py 输出）；不给则查 state 目录")
     ap.add_argument("--state-dir", default=r"D:\event-ledger-data\state")
     ap.add_argument("--store", default=r"D:\event-ledger-data")
     ap.add_argument("--out", default=r"D:\event-ledger-data\extracted\gnews_feed.jsonl")
@@ -132,23 +134,32 @@ def main():
     import fetch_articles as FETCH
     S.detect_proxy(None)
 
-    # 哪些源需要走这条通道：主表里无入口 + 证据显示是 403
-    import glob
+    # 哪些源需要走这条通道
+    #
+    # 两种来源：
+    #   --in 给归因文件（diagnose_no_entry.py 的输出），取 HTTP_401/403 那批
+    #   不给 --in 就从 state 目录里找 last_error 含 403 的（已调度过的）
     need = []
-    for f in glob.glob(os.path.join(a.state_dir, "*.json")):
-        try:
-            j = json.load(io.open(f, encoding="utf-8"))
-        except Exception:  # noqa: BLE001
-            continue
-        err = str(j.get("last_error") or "")
-        if "403" in err or "401" in err:
-            need.append(j.get("domain"))
+    if a.inp:
+        for x in json.load(io.open(a.inp, encoding="utf-8")):
+            if x.get("reason") in ("HTTP_403", "HTTP_401", "HTTP_429"):
+                need.append(x["domain"])
+    else:
+        import glob
+        for f in glob.glob(os.path.join(a.state_dir, "*.json")):
+            try:
+                j = json.load(io.open(f, encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            err = str(j.get("last_error") or "")
+            if "403" in err or "401" in err:
+                need.append(j.get("domain"))
     need = sorted(set(d for d in need if d))
     if a.limit:
         need = need[:a.limit]
 
     print("")
-    print("  需要走 Google News 通道的源 %d 家（被 401/403 挡住的）" % len(need))
+    print("  需要走聚合通道的源 %d 家（被 401/403/429 挡住的）" % len(need))
     print("")
 
     rows = []
