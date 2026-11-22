@@ -659,6 +659,25 @@ def html_to_body(html):
         if out and len(s) < 60:
             break
         out.append(s)
+
+    # 判「这块到底是不是正文」。
+    # 实测问题：侧栏的「相关文章列表」条目之间没有分隔，会被当成
+    # 一个很长的连续块。它们长这样：
+    #   «Russell Brand's prison message IDF soldiers operating in the West Bank.»
+    #   «Appeals in the cases in Texas and Florida were pending.»
+    # 条目都是标题，**不以句号结尾**；正文段落几乎都以句号收尾。
+    # 所以看句末标点占比：正文块应该有一半以上的行带句末标点。
+    def sentence_ratio(block):
+        if not block:
+            return 0.0
+        n = sum(1 for s in block
+                if re.search(r"[.。!?！？][\"'”’)\]]?\s*$", s))
+        return n / len(block)
+
+    if out and sentence_ratio(out) < 0.35:
+        # 这块不像正文，退回去用全部筛过的行
+        out = lines
+
     return "\n\n".join(out or body)
 
 
