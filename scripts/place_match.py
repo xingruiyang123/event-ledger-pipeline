@@ -83,9 +83,7 @@ STOP_NAMES = {
     "block", "colony", "extension", "scheme", "society", "camp",
     "base", "port", "airport", "station", "hospital", "university",
     "college", "school", "academy", "institute", "mobile", "a la",
-    "media", "content", "massacre", "mali", "iran", "iraq", "oman",
-    "chad", "jordan", "guinea", "niger", "congo", "sudan", "japan",
-    "china", "india", "israel", "egypt", "libya", "syria", "yemen",
+    "media", "content", "massacre",
     "police", "army", "court", "judge", "doctor", "leader",
     "minister", "president", "attack", "bomb", "blast", "shooting",
     "killed", "death", "victim", "suspect", "gunmen", "militant",
@@ -255,18 +253,39 @@ class Gazetteer:
         # ---- 拉丁：按词查表 ----
         toks = [(m.start(), m.group(0)) for m in WORD.finditer(text)]
         lows = [t[1].lower() for t in toks]
+        # 剥所有格后的形态：Gaza's → gaza、Burkina Faso's → burkina faso
+        # 不剥的话，「Gaza's largest hospital」里的 Gaza 查的是 "gaza's"，
+        # 词表里没有，整条地名就丢了。
+        lows_core = []
+        for w in lows:
+            for suf in ("'s", "’s"):
+                if w.endswith(suf) and len(w) > len(suf) + 1:
+                    w = w[:-len(suf)]
+                    break
+            lows_core.append(w)
         n = len(toks)
         for i in range(n):
             t = toks[i][1]
             if not t[:1].isupper():
                 continue
+            # 所有格：「Gaza's largest hospital」里的 Gaza 要能认出来。
+            # 不剥掉 's，查表查的是 "gaza's"，词表里没有，整条地名就丢了。
+            # 实测：semafor 报道加沙医院遇袭，首段有 Israel 和 Gaza's，
+            # 但一个都没匹配到，国家被判成「美国」（因为正文别处有华盛顿）。
+            t_core = t
+            for suf in ("'s", "'S", "’s", "’S"):
+                if t_core.endswith(suf) and len(t_core) > len(suf) + 1:
+                    t_core = t_core[:-len(suf)]
+                    break
             # 句首的大写词要不要算证据，分两种情况：
-            #   · 单字命中：跳过。英文每句第一个词都大写，
-            #     「Sochi」「Soci」这种在句首就是普通的大写词，跳掉最稳。
-            #   · 多词命中（Port Said、New Delhi、Sao Paulo）：保留。
-            #     实测漏例：「Port Said was hit by a blast」——
-            #     Port 在句首被跳过，整条地名就没了。
-            #     多词地名不是普通英文句子会碰巧凑出来的。
+            #   · 单字且是城市名：跳过。英文每句第一个词都大写，
+            #     「Sochi」这种在句首就是普通的大写词。
+            #   · 单字但是国名/省级名：**保留**。
+            #     实测漏例：「Israel on Wednesday conducted an hours-long
+            #     raid on al-Shifa」—— Israel 在句首被跳过，
+            #     整篇文章的国家判定就崩了。
+            #   · 多词命中（Port Said、New Delhi）：保留，
+            #     多词地名不是普通英文句子能碰巧凑出来的。
             at_sentence_start = False
             if i == 0:
                 at_sentence_start = True
@@ -275,12 +294,18 @@ class Gazetteer:
                 if prev and prev[-1:] in ".!?:\"»'":
                     at_sentence_start = True
             for k in range(1, min(self.max_words, n - i) + 1):
-                key = " ".join(lows[i:i + k])
+                if k == 1:
+                    key = lows_core[i]
+                else:
+                    key = " ".join(lows_core[i:i + k])
                 ents = self.by_form.get(key)
                 if not ents:
                     continue
                 if k == 1 and at_sentence_start:
-                    continue
+                    # 句首单字只保留国名/省级名，城市名跳过
+                    if not any(e.get("level") in ("country", "admin1")
+                               for e in ents):
+                        continue
                 # 单字命中时，若前一个词也是大写开头，多半是人名/品牌名的一部分。
                 # 实测：「Lockheed Martin to manufacture ExLS naval missile
                 # launchers」被判成斯洛伐克城市「马丁」（Martin）——

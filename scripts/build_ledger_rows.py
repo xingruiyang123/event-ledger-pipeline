@@ -678,7 +678,9 @@ def html_to_body(html):
         # 这块不像正文，退回去用全部筛过的行
         out = lines
 
-    return "\n\n".join(out or body)
+    text_out = "\n\n".join(out or body)
+    # 剥掉开头混进来的「别的文章的标题」（yahoo 那种相关新闻小卡）
+    return _strip_foreign_head(text_out)
 
 
 # 导航/菜单常见词。只用来统计行内密度，不做匹配规则。
@@ -746,6 +748,13 @@ def ledger_row(rec, gaz, today, template=None):
     if not lead_para:
         lead_para = text[:1500]
 
+    # 这道门决定「这篇文章进不进候选池」。
+    # 放在抽取层最前面，因为它判的是「是不是事件报道」；
+    # 判定层要判的是「算不算恐怖袭击」—— 两个标准不能混。
+    is_event, why_not = is_event_report(lead_para)
+    if not is_event:
+        return None, why_not
+
     deaths, injured, nbasis = extract_numbers(lead_para)
     y, mo, d, dbasis = extract_date(text, rec.get("published") or "")
 
@@ -762,21 +771,29 @@ def ledger_row(rec, gaz, today, template=None):
     clean = _mask_text(text, _country_run_ranges(text, gaz)) if gaz else text
     # 再抹掉开头一段密集摘要列表（Google News 那种「标题 + 来源」堆叠）
     clean = _mask_repeated_headings(clean)
-    lead = clean[:max(1200, len(clean) // 3)]
-    lead_hits = gaz.find(lead, max_hits=30) if gaz else []
-    use_hits = lead_hits or (gaz.find(clean, max_hits=60) if gaz else [])
-    places = []
-    seen = set()
-    for h in use_hits:
-        e = h["entry"]
-        key = (e.get("name"), e.get("admin1"))
-        if key in seen:
-            continue
-        seen.add(key)
-        places.append(e)
-    # 主地点：优先城市级，其次按出现顺序
-    city_hits = [e for e in places if e.get("level") == "city"]
-    main_place = (city_hits or places or [None])[0]
+
+    # 国家与地点按**内容**判：首段里的地名 + 袭击动作锚点。
+    # 旧做法「正文前 1/3 第一个城市」在跨国媒体报道上必然错 ——
+    # semafor 报道加沙的事，正文里有 Washington（记者站），判出来就是美国。
+    main_place, place_basis = _pick_event_place(clean, gaz, lead_para)
+    if main_place is None:
+        # 首段真的没有地名，退回旧办法
+        lead = clean[:max(1200, len(clean) // 3)]
+        lead_hits = gaz.find(lead, max_hits=30) if gaz else []
+        use_hits = lead_hits or (gaz.find(clean, max_hits=60) if gaz else [])
+        places = []
+        seen = set()
+        for h in use_hits:
+            e = h["entry"]
+            key = (e.get("name"), e.get("admin1"))
+            if key in seen:
+                continue
+            seen.add(key)
+            places.append(e)
+        city_hits = [e for e in places if e.get("level") == "city"]
+        main_place = (city_hits or places or [None])[0]
+        if main_place is not None:
+            place_basis = "正文前1/3首个城市（兜底）"
 
     country = ""
     country_zh = ""
@@ -784,14 +801,9 @@ def ledger_row(rec, gaz, today, template=None):
         country_zh = main_place.get("country_zh") or ""
         country = country_zh or main_place.get("country") or ""
     else:
-        # 没有地名命中就看国家词频
-        cnt = Counter()
-        for h in use_hits:
-            e = h["entry"]
-            if e.get("level") == "country":
-                cnt[e.get("country_zh") or e.get("country") or ""] += 1
-        if cnt:
-            country = cnt.most_common(1)[0][0]
+        # 连兜底都没有 → 不填。宁缺勿错：
+        # 填一个国家会让下游统计凭空多出一条事件。
+        place_basis = place_basis or "未找到事件地点"
 
     place_str = ""
     if main_place:
@@ -855,7 +867,7 @@ def ledger_row(rec, gaz, today, template=None):
         "置信度": conf,
         "审核状态": "待审",
         "关联知识点": "",
-        "备注": "｜".join(x for x in (nbasis, dbasis,
+        "备注": "｜".join(x for x in (nbasis, dbasis, place_basis,
                                    "站点模板地名已剔除" if _tpl_dropped else "")
                         if x)[:200],
     })
@@ -902,6 +914,7 @@ def main():
 
     rows = []
     n_read = n_text = n_skip = 0
+    n_not_event = n_agg = 0
     for p in files:
         try:
             m = json.load(io.open(p, encoding="utf-8"))
@@ -941,11 +954,19 @@ def main():
             text = html_to_body(raw)
         if len(text) < 200:
             continue
+        # 聚合页：一页多篇。抽出来的「正文」是几条无关新闻的拼接，
+        # 用它判国家、判袭击方式全是错的。
+        if looks_like_aggregate(text):
+            n_agg += 1
+            continue
         n_text += 1
         rec = {"url": m.get("url"), "final_url": m.get("final_url"),
                "title": m.get("title"), "published": m.get("published"),
                "text": text[:20000]}
         row, score = ledger_row(rec, gaz, today, template)
+        if row is None:
+            n_not_event += 1
+            continue
         if score < a.min_score:
             continue
         row["_score"] = score
@@ -954,6 +975,10 @@ def main():
     print("")
     print("  初筛（标题无袭击词）剔除 %d 篇 ｜ 进入抽取 %d 篇 ｜ 有正文 %d 篇"
           % (n_skip, n_read, n_text))
+    print("  非事件报道（首段无「袭击动作+后果」）剔除 %d 篇" % n_not_event)
+    print("  聚合页（一页多篇）剔除 %d 篇" % n_agg)
+    rows, n_dup = dedupe_rows(rows)
+    print("  内容重复（同篇多 URL 副本）合并 %d 行" % n_dup)
     print("  产出候选行 %d" % len(rows))
     print("")
 
@@ -983,6 +1008,330 @@ def main():
         print("")
         print("  台账候选 → %s（%d 行 × %d 列）" % (a.out, len(rows), len(LEDGER_COLS)))
     return 0
+
+
+# ============================================================
+# 事件报道判据：这篇文章到底在不在讲一起具体的袭击
+# ============================================================
+# 抽取层的输入是「抓到的所有文章」，其中大部分不是事件报道：
+#   · 体育新闻「Dean knows how a championship defense is supposed to look」
+#   · 讣告「Anthony Clark's cause of death has been revealed」
+#   · 网络安全「Shai-Hulud worm exploited GitHub Actions」
+#   · 政治评论「Can the Nevada Legislature improve outcomes?」
+#   · 医学网站（acc.org 是心脏病学会）
+#
+# 共同点：没有「袭击动作」，或者有动作但**没有后果**。
+# 讣告里有 death，那是病死的；网络安全新闻里有 attack，但没人死、没设施被炸。
+#
+# 判据：首段必须同时出现
+#   ① 袭击动作（ATTACK_MOVE）
+#   ② 伤亡、实体破坏或被控制的人员
+# 两条都不满足的不是事件报道，不进候选池。
+#
+# 为什么放在抽取层而不是判定层：判定层要判「算不算恐怖袭击」，
+# 不是「算不算新闻事件」。两个标准混在一起，谁也说不清。
+ATTACK_MOVE = re.compile(
+    r"(?i)\b(?:attack(?:ed|s|ing)?|assail\w*|assault(?:ed|s)?|"
+    r"bomb(?:ed|ing|s)?|blast(?:ed|s)?|explos\w+|"
+    r"shoot(?:ing|s)?|shot|opened fire|fired (?:at|on|upon)|"
+    r"stab(?:bed|bing|s)?|slash(?:ed|ing)?|machete|"
+    r"kidnap(?:ped|ping|s)?|abduct(?:ed|ion|ions|ing)?|taken hostage|"
+    r"ambush(?:ed|es|ing)?|raid(?:ed|s|ing)?|storm(?:ed|ing|s)?|"
+    r"torch(?:ed|ing)?|set (?:fire|ablaze)|arson|"
+    r"massacre[ds]?|beat(?:en|ing)?|bludgeon\w*|"
+    r"hijack(?:ed|ing)?|siege|assassinat(?:ed|ion)|"
+    r"clash(?:es|ed|ing)?|fighting|gunbattle|firefight|"
+    r"insurgen\w*|militants? (?:attack|struck)|"
+    r"gunmen|suicide bomb\w*|car bomb|ied\b|grenade|rocket|mortar)\b|"
+    r"袭击|爆炸|枪击|砍杀|纵火|绑架|劫持|伏击|交火|暗杀")
+
+# 「强动作」：动作本身就说明发生了暴力事件，不要求首段再写后果。
+# 「raid on al-Shifa hospital」这种，新闻当时还没统计出伤亡，但事情发生了。
+# 反过来「attack on its servers」「fighting for rights」这类泛泛的用法，
+# 必须靠后果来证明它真是一个事件 —— 否则网络安全新闻全进来了。
+INHERENT_HARM = re.compile(
+    r"(?i)\b(?:bomb(?:ed|ing|s)?|blasts?|explos\w+|torch\w*|arson|"
+    r"set (?:fire|ablaze)|burn(?:ed|t)|massacr\w*|beat(?:en)? to death|"
+    r"shoot(?:ing|s)?|shot|opened fire|stab(?:bed|bing)?|"
+    r"kidnap(?:ped|ping)?|abduct(?:ed|ion)?|taken hostage|held hostage|"
+    r"ambush(?:ed)?|raid(?:ed)?|storm(?:ed)?|assassinat\w*|"
+    r"hijack(?:ed|ing)?|siege|suicide bomb\w*)\b|"
+    r"爆炸|枪击|砍杀|纵火|绑架|劫持|伏击|暗杀|袭击")
+
+HARM_RESULT = re.compile(
+    r"(?i)(?:"
+    r"\b(?:kill(?:ed|s|ing)?|dead|deaths?|died|fatalit\w*|"
+    r"injur(?:ed|es|y|ing)|wound(?:ed|s|ing)?|casualt\w*|bodies|corpse|"
+    r"slain|murder(?:ed|s)?|massacred)\b"
+    r"|"
+    r"\b(?:destroyed|damaged|razed|torched|blown up|bombed|shelled|"
+    r"levelled|leveled|gutted|wrecked)\b"
+    r"|"
+    r"死亡|受伤|伤亡|丧生|遇难|身亡|遇害|被毁|被炸"
+    r")")
+
+# 绑架/劫持：受害者在报道时还活着，文本里可能没有 death 也没有 destroy。
+# 后果是「人员被控制」，靠 CAPTIVE_EVENT 放行。
+CAPTIVE_EVENT = re.compile(
+    r"(?i)\b(?:kidnap(?:ped|ping|s)?|abduct(?:ed|ion|ions|ing)?|"
+    r"taken hostage|held hostage|hostage|seized|missing)\b|"
+    r"绑架|劫持|被绑|失踪")
+
+# 研究/统计类报道不是事件。
+# 「Study finds terrorism deaths rose 12 percent since 2020」
+# 有 terror（动作词）、有 deaths（后果词），两条都满足，
+# 但它讲的是统计趋势，不是一起事件。
+STUDY_REPORT = re.compile(
+    r"(?i)\b(?:study|studies|report (?:says|finds|shows|warns)|"
+    r"research(?:ers)? (?:say|says|found|shows)|survey|data shows|"
+    r"according to a (?:new )?(?:report|study|survey)|"
+    r"analysis (?:says|finds|shows)|statistics show|"
+    r"index (?:shows|finds)|figures show)\b|"
+    r"研究报告|调查显示|统计显示|数据显示|分析指出")
+
+# 电头：`WASHINGTON (Reuters) -`、`LONDON, Nov 20 (Reuters) -`。
+# 这是记者的发稿地，不是事件发生地。
+# 不一刀切掉，就会把「路透华盛顿电」记成事件在美国。
+DATELINE = re.compile(
+    r"^\s*[A-Z][A-Za-z\.\-']{1,28}"
+    r"(?:[ ,]+[A-Z][A-Za-z\.\-']{1,18}){0,3}"
+    r"(?:\s*\([A-Za-z ]{2,20}\))?"
+    r"(?:\s*,?\s*\d{1,2}\s+[A-Z][a-z]{2,9}\s+\d{4})?"
+    r"\s*(?:--|—|–|-)\s+")
+
+
+def _strip_dateline(text):
+    """剥掉开头的电头。只剥一层，剥不掉就算了 —— 猜错比不剥更糟。"""
+    t = (text or "").lstrip()
+    m = DATELINE.match(t)
+    if m and len(m.group(0)) < 90:
+        return t[m.end():]
+    return t
+
+
+def _strip_foreign_head(body):
+    """剥掉正文开头混进来的「别的文章的标题」。
+
+    实测 yahoo.com 的新闻页，正文容器前面挂了一张「相关新闻」小卡：
+      [ 33 字] Nvidia won't reinstate Huang          ← 另一篇（科技）的标题
+      [234 字] A 19-year-old Palatine man has been indicted on 27 charges…
+    第一行是别的新闻标题，第二行起才是真正文。
+    不剥掉，首段就变成「Nvidia 不发 Huang 的邀请函」，
+    国家、袭击方式、判定全跟着错。实测同一个 URL 出了 58 条互不相同的候选。
+
+    判据：开头连续若干行，只要「短（<60 字）且不以句末标点结尾」就是标题，丢掉。
+    """
+    lines = [x.strip() for x in (body or "").split("\n") if x.strip()]
+    i = 0
+    while i < len(lines) and i < 5:
+        x = lines[i]
+        if len(x) < 60 and not re.search(r"[.。!?！？][\"'”’)\]]?\s*$", x):
+            i += 1
+            continue
+        break
+    if i == 0:
+        return body
+    return "\n\n".join(lines[i:])
+
+
+def looks_like_aggregate(body):
+    """判断抽出来的这块是不是「多篇文章拼在一个页面上」。
+
+    yahoo.com 的栏目页把多条新闻渲染在同一页，抽出来是几条无关新闻的拼接。
+    用它判国家、判袭击方式全是错的。
+
+    判据：开头 6 行里若有 ≥2 行「短且不以句末标点结尾」，就是标题堆叠。
+    正文第一行通常是导语，会有完整句子。
+    """
+    lines = [x.strip() for x in (body or "").split("\n") if x.strip()]
+    if len(lines) < 3:
+        return False
+    n_title = 0
+    for x in lines[:6]:
+        ends_ok = bool(re.search(r"[.。!?！？][\"'”’)\]]?\s*$", x))
+        if len(x) < 120 and not ends_ok:
+            n_title += 1
+    return n_title >= 2
+
+
+def is_event_report(lead):
+    """首段是否在讲一起具体的袭击事件。
+
+    返回 (是否, 依据)。依据写进备注，方便人工复核时看机器凭什么放行/拦下。
+    """
+    t = lead or ""
+    if not t:
+        return False, "无首段"
+    if STUDY_REPORT.search(t) and not INHERENT_HARM.search(t):
+        return False, "研究/统计类报道，不是具体事件"
+    neg, why = is_context_negative(t)
+    if neg:
+        return False, "语境反例：" + why
+    moved = ATTACK_MOVE.search(t)
+    harmed = HARM_RESULT.search(t)
+    captive = CAPTIVE_EVENT.search(t)
+    inherent = INHERENT_HARM.search(t)
+    if moved and (harmed or captive or inherent):
+        return True, ""
+    if moved:
+        return False, "首段只有泛泛的动作，没有伤亡、破坏或被控制的人员"
+    if harmed:
+        return False, "首段有伤亡但无袭击动作（事故/讣告/医疗）"
+    return False, "首段无袭击动作"
+
+
+def _pick_event_place(text, gaz, lead):
+    """按内容挑事件发生地：袭击动作做锚点，取离它最近的地名。
+
+    为什么不能用「正文前 1/3 第一个城市」
+    --------------------------------
+    那套判据在跨国媒体的报道上必然错：
+    semafor 报道加沙的事，正文里有 Washington（记者站）、Israel、Gaza，
+    「第一个城市」取到华盛顿 → 国家记成美国。
+    实测 773 条「美国」里大半是这么来的，而美国本土恐袭一年是个位数。
+
+    新闻写作的规律是「谁在哪做了什么」写在首段。所以：
+      ① 首段优先，找不到地名才往后扩到全文前 1/3；
+      ② 以袭击动作词为锚点，取**距离最近**的地名；
+         "Gunmen attacked a village in northern Nigeria, killing 12" → Nigeria
+         "raid on al-Shifa in Gaza ... prompting alarm from Washington" → Gaza
+      ③ 城市级加权靠前（更精确）。
+
+    返回 (entry, 依据)。找不到返回 (None, "")。
+    """
+    if not gaz:
+        return None, ""
+    seg = _strip_dateline(lead or text or "")
+    if not seg:
+        return None, ""
+
+    anchors = [m.start() for m in ATTACK_MOVE.finditer(seg)]
+    hits = gaz.find(seg, max_hits=80)
+    if not hits:
+        seg2 = _strip_dateline(text or "")
+        seg2 = seg2[:max(1500, len(seg2) // 3)]
+        anchors = [m.start() for m in ATTACK_MOVE.finditer(seg2)]
+        hits = gaz.find(seg2, max_hits=80)
+        seg = seg2
+    if not hits:
+        return None, ""
+
+    def score(h):
+        if not anchors:
+            return (h["start"], 0 if h["entry"].get("level") == "city" else 1)
+        d = min(abs(h["start"] - a) for a in anchors)
+        bonus = 0 if h["entry"].get("level") == "city" else 40
+        return (d + bonus, h["start"])
+
+    best = min(hits, key=score)
+    d, _ = score(best)
+    return best["entry"], "首段袭击动作锚点（距离 %d 字符）" % d
+
+
+
+def _dedupe_key(row):
+    """同一篇新闻的多个 URL 副本 → 同一个键。
+
+    yahoo 的 URL 尾部是一串数字（-164743176.html），同一篇新闻
+    每次生成一个不同的数字。去掉它，再看摘要前缀。
+    """
+    url = str(row.get("信息来源URL") or "")
+    url = re.sub(r"[-_]\d{6,}(?=\.(?:html?|php|aspx?)?$)", "", url)
+    url = re.sub(r"\?.*$", "", url)
+    summary = re.sub(r"\W+", "", str(row.get("事件摘要") or ""))[:60].lower()
+    return (url, summary)
+
+
+def dedupe_rows(rows):
+    """按内容去重，保留第一次出现的那条。
+
+    返回 (去重后, 去掉的条数)。
+    """
+    seen = set()
+    out = []
+    for r in rows:
+        k = _dedupe_key(r)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(r)
+    return out, len(rows) - len(out)
+
+
+# 反例一：航天。`blast off`、`rocket launch`、`space shuttle` 里的 blast
+# 是火箭点火，不是爆炸袭击。实测「Space shuttle Atlantis will blast off」
+# 被当成爆炸事件，国家判到南非。
+SPACE_NEWS = re.compile(
+    r"(?i)\b(?:blast off|blasted off|rocket launch|spacecraft|space shuttle|"
+    r"space station|NASA|ESA|SpaceX|Blue Origin|orbital|orbit\b|"
+    r"satellite|cosmonaut|astronaut|payload fairing|re-?entry|"
+    r"solar storm|space weather|launch window)\b")
+
+# 反例二：武器装备介绍。`MRAP (Mine-Resistant Ambush Protected)`
+# 里的 Ambush 是车名的一部分。这类文章整篇讲型号参数，不是事件。
+WEAPON_SPEC = re.compile(
+    r"(?i)\b(?:MRAP|mine-?resistant|armou?red (?:vehicle|personnel carrier)|"
+    r"APC\b|IFV\b|main battle tank|combat vehicle|"
+    r"frigate|destroyer|corvette|submarine|"
+    r"fighter jet|bomber aircraft|attack helicopter|"
+    r"air defense system|missile system|radar system|"
+    r"is a \d+(?:x\d+)? .{0,30}vehicle|designed and manufactured|"
+    r"entered service|serial production|maiden flight|"
+    r"defen[cs]e contract|arms deal)\b")
+
+# 反例三：事故。油罐车翻车、火车脱轨、瓦斯泄漏、电线短路，
+# 文本里全是 explosion / blast / killed，但它们没有施害者。
+ACCIDENT_NEWS = re.compile(
+    r"(?i)\b(?:tanker|fuel truck|petrol tanker|camion-citerne|"
+    r"gas leak|gas explosion|gas cylinder|pipeline rupture|"
+    r"derailed|derailment|train crash|road accident|car crash|"
+    r"collision|electrical fault|short circuit|"
+    r"mine collapse|building collapse|scaffolding|"
+    r"industrial accident|workplace accident|"
+    r"negligence|safety lapses?)\b|"
+    r"翻车|脱轨|瓦斯爆炸|燃气泄漏|车间事故|坍塌")
+
+# 反例四：偷猎/野生动物。`shot` 出现在「Elk illegally shot」里。
+WILDLIFE_NEWS = re.compile(
+    r"(?i)\b(?:elk|deer|moose|bear|wolf|poach\w*|trophy hunt\w*|"
+    r"antlers?|carcass|wildlife (?:officer|department|crime)|"
+    r"game warden|illegally (?:shot|killed) (?:an? )?(?:elk|deer|bear))\b")
+
+# 反例五：司法/判决类后续报道。
+# 「 convicted of stabbing ... was sentenced to 25 years」——
+# 事件本身发生在几年前，这篇是判刑消息，不是新事件。
+COURT_FOLLOWUP = re.compile(
+    r"(?i)\b(?:sentenced to|pleads? not guilty|pleaded not guilty|"
+    r"convicted of|acquitted|indicted on|jury (?:found|convicted)|"
+    r"appeals? court|supreme court (?:ruled|upholds)|"
+    r"charged with|arraigned|bail (?:set|granted)|"
+    r"will (?:stand|go) trial|case adjourned)\b")
+
+
+def is_context_negative(text):
+    """语境反例：字面命中暴力词，但整篇不是袭击事件。
+
+    返回 (是否命中反例, 类别)。
+    """
+    t = text or ""
+    if SPACE_NEWS.search(t):
+        return True, "航天发射"
+    if WEAPON_SPEC.search(t):
+        return True, "武器装备介绍"
+    if ACCIDENT_NEWS.search(t):
+        return True, "事故（无施害者）"
+    if WILDLIFE_NEWS.search(t):
+        return True, "野生动物/偷猎"
+    return False, ""
+
+
+def is_court_followup(text):
+    """司法后续报道：事件已发生，这篇讲的是判刑/开庭，不是新事件。
+
+    单独一个函数，因为它和「不是事件」有区别 —— 它确实对应一起事件，
+    只是不该记成**新的一条**。上层要怎么处理由调用方决定。
+    """
+    return bool(COURT_FOLLOWUP.search(text or ""))
 
 
 if __name__ == "__main__":
