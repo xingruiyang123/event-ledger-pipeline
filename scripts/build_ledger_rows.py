@@ -42,6 +42,8 @@ import io
 import json
 import os
 import re
+
+import lexicon as LEX
 import sys
 from collections import Counter
 
@@ -807,11 +809,15 @@ def ledger_row(rec, gaz, today, template=None):
 
     place_str = ""
     if main_place:
-        bits = [main_place.get("name_zh") or main_place.get("name") or ""]
+        # 地点写**当地官方语言原文**，不翻译。
+        # 编码规范 4.4：「行政区划名称使用当地官方语言原文（不进行翻译）」。
+        # 原来写的是 name_zh（「加沙」「黑尔讷」），那是中文译名，
+        # 既不符合要求，也没法和 GTD 的 admin1 对照。
+        bits = [main_place.get("name") or ""]
         a1 = main_place.get("admin1") or ""
         if a1 and a1 != main_place.get("name"):
             bits.append(a1)
-        place_str = "，".join(x for x in bits if x)
+        place_str = ", ".join(x for x in bits if x)
 
     # 站点模板地名：这一篇判出的地点就是该站所有文章都命中的那个，
     # 说明它是页脚/侧栏里的词，不是文章讲的地方。
@@ -1030,7 +1036,8 @@ def main():
 #
 # 为什么放在抽取层而不是判定层：判定层要判「算不算恐怖袭击」，
 # 不是「算不算新闻事件」。两个标准混在一起，谁也说不清。
-ATTACK_MOVE = re.compile(
+ATTACK_MOVE = LEX.build(LEX.ATTACK)
+_ATTACK_MOVE_OLD = re.compile(
     r"(?i)\b(?:attack(?:ed|s|ing)?|assail\w*|assault(?:ed|s)?|"
     r"bomb(?:ed|ing|s)?|blast(?:ed|s)?|explos\w+|"
     r"shoot(?:ing|s)?|shot|opened fire|fired (?:at|on|upon)|"
@@ -1049,7 +1056,8 @@ ATTACK_MOVE = re.compile(
 # 「raid on al-Shifa hospital」这种，新闻当时还没统计出伤亡，但事情发生了。
 # 反过来「attack on its servers」「fighting for rights」这类泛泛的用法，
 # 必须靠后果来证明它真是一个事件 —— 否则网络安全新闻全进来了。
-INHERENT_HARM = re.compile(
+INHERENT_HARM = LEX.build(LEX.INHERENT)
+_INHERENT_HARM_OLD = re.compile(
     r"(?i)\b(?:bomb(?:ed|ing|s)?|blasts?|explos\w+|torch\w*|arson|"
     r"set (?:fire|ablaze)|burn(?:ed|t)|massacr\w*|beat(?:en)? to death|"
     r"shoot(?:ing|s)?|shot|opened fire|stab(?:bed|bing)?|"
@@ -1058,7 +1066,8 @@ INHERENT_HARM = re.compile(
     r"hijack(?:ed|ing)?|siege|suicide bomb\w*)\b|"
     r"爆炸|枪击|砍杀|纵火|绑架|劫持|伏击|暗杀|袭击")
 
-HARM_RESULT = re.compile(
+HARM_RESULT = LEX.build(LEX.HARM)
+_HARM_RESULT_OLD = re.compile(
     r"(?i)(?:"
     r"\b(?:kill(?:ed|s|ing)?|dead|deaths?|died|fatalit\w*|"
     r"injur(?:ed|es|y|ing)|wound(?:ed|s|ing)?|casualt\w*|bodies|corpse|"
@@ -1072,7 +1081,8 @@ HARM_RESULT = re.compile(
 
 # 绑架/劫持：受害者在报道时还活着，文本里可能没有 death 也没有 destroy。
 # 后果是「人员被控制」，靠 CAPTIVE_EVENT 放行。
-CAPTIVE_EVENT = re.compile(
+CAPTIVE_EVENT = LEX.build(LEX.CAPTIVE)
+_CAPTIVE_EVENT_OLD = re.compile(
     r"(?i)\b(?:kidnap(?:ped|ping|s)?|abduct(?:ed|ion|ions|ing)?|"
     r"taken hostage|held hostage|hostage|seized|missing)\b|"
     r"绑架|劫持|被绑|失踪")

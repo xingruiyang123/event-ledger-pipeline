@@ -29,6 +29,8 @@ judge_events.py 负责判「算不算恐怖袭击」（判定链 M0/N1-N6/P1-P7�
 """
 import re
 
+import lexicon as LEX
+
 # ============================================================
 # 袭击方式
 # ============================================================
@@ -55,7 +57,10 @@ _ASSASSINATION_ACT = re.compile(
 # 「gunmen」几乎出现在每条袭击报道里，用它判「武装袭击」会吞掉
 # 绑架、劫持、爆炸 —— 实测「Gunmen stormed a hotel and held 200 people
 # hostage」被判成武装袭击，而它的主要目的是劫持。
-_ARMED = re.compile(
+_ARMED = LEX.build(LEX.ARMED)
+
+
+_ARMED_OLD = re.compile(
     r"(?i)\b(?:firearms?|rifles?|pistols?|revolvers?|AK-?47|machine guns?|"
     r"shotguns?|shoot(?:ing|out|s)?|shot|opened fire|fired (?:at|on|upon)|"
     r"sprayed (?:bullets|gunfire)|bullets?|"
@@ -63,21 +68,30 @@ _ARMED = re.compile(
     r"hack(?:ed|ing)?|axe|arson|set (?:fire|ablaze)|burn(?:ed|t|ing)|"
     r"torch(?:ed)?)\b|枪击|开枪|射击|砍杀|刀砍|纵火|焚烧")
 
-_BOMBING = re.compile(
+_BOMBING = LEX.build(LEX.BOMBING)
+
+
+_BOMBING_OLD = re.compile(
     r"(?i)\b(?:bombs?|bombed|bombing|blasts?|blasted|explos(?:ion|ive|ives|ed)|"
     r"IEDs?|improvised explosives?|grenades?|landmines?|land mines?|"
     r"suicide attacks?|suicide bombings?|car bombs?|truck bombs?|vbieds?|"
     r"rockets?|mortars?|artillery shells?|missiles?|detonat\w*)\b|"
     r"爆炸|炸弹|引爆|自杀式")
 
-_KIDNAP = re.compile(
+_KIDNAP = LEX.build(LEX.KIDNAP)
+
+
+_KIDNAP_OLD = re.compile(
     r"(?i)\b(?:kidnap(?:ped|ping|s)?|abduct(?:ed|ion|ions|ing)?|"
     r"taken hostage|seized|snatched|captured \d+|held captive|ransom)\b|"
     r"绑架|劫持人质|掳走")
 
 # 劫持：公开控制人质、发生在目标地点、时间较短。
 # 与绑架的区别是「地点」和「时长」，不是「有没有人质」。
-_HIJACK = re.compile(
+_HIJACK = LEX.build(LEX.HIJACK)
+
+
+_HIJACK_OLD = re.compile(
     r"(?i)\b(?:hijack(?:ed|ing|s)?|hostage (?:crisis|situation|standoff|drama)|"
     r"stormed (?:the )?(?:building|hotel|cafe|restaurant|school|"
     r"hospital|mall|airport)|siege|barricaded|took over|"

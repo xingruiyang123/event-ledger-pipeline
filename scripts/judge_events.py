@@ -889,6 +889,17 @@ def _weapons_of(rec):
         return ""
 
 
+def casualty_for_ledger(rec, key):
+    value = rec.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if value is not None and str(value).strip():
+        text = str(value).strip()
+        return int(text) if text.isdecimal() else text
+    raw = _extra_of(rec).get("casualty_source_values")
+    return raw.get(key, "") if isinstance(raw, dict) else ""
+
+
 def to_row(rec, verdict, chain, note):
     d = rec.get("date") or ""
     try:
@@ -907,8 +918,8 @@ def to_row(rec, verdict, chain, note):
         "国家": rec.get("country") or "",
         "年份": y, "月份": mo, "日期": dd,
         "地点": rec.get("place") or "",
-        "死亡人数": rec.get("deaths") if isinstance(rec.get("deaths"), int) else 0,
-        "受伤人数": rec.get("injured") if isinstance(rec.get("injured"), int) else 0,
+        "死亡人数": casualty_for_ledger(rec, "deaths"),
+        "受伤人数": casualty_for_ledger(rec, "injured"),
         "袭击方式": rec.get("act_type") or "",
         "袭击武器": _weapons_of(rec),
         "袭击者": rec.get("actor_a") or "",
@@ -919,7 +930,7 @@ def to_row(rec, verdict, chain, note):
         # A = 两个及以上独立源都记了这件事；B = 只有一个源。
         # 不是「我们有多相信自己的判断」，而是「这件事有几个独立来源」。
         "置信度": "A" if ns >= 2 else "B",
-        "审核状态": "已确认" if verdict == "计入" else ("待审核" if verdict == "需人工判" else "已退回"),
+        "审核状态": "待审核",
         "关联知识点": chain,
         # 备注里带上「媒体名 + 标题」：UCDP 不给 URL，后续 enrich_urls 靠这个反查
         # 另带「性质分档」：A/B = 高置信子集（实测精确率 68-82%），
@@ -1055,8 +1066,9 @@ def main():
         for k, v in ctys.most_common(15):
             print("  %-18s %4d" % (k, v))
         print()
-        print("-- 死亡合计：%d（仅统计「计入」类，不含保留作对照的 %d 条）"
-              % (sum(r["死亡人数"] for r in led), len(keep)))
+        known = [r["死亡人数"] for r in led if isinstance(r["死亡人数"], int)]
+        print("-- 已知死亡数合计：%d（有数值 %d/%d 条，不含保留作对照的 %d 条）"
+              % (sum(known), len(known), len(led), len(keep)))
         print()
 
     if not led:

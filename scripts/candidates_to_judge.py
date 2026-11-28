@@ -61,7 +61,7 @@ NON_NUMERIC = {"不详", "数人", "多人", "若干", "几十", "数百", "数�
 
 def _int_or_none(v):
     """把人数列转成 int / None，并把非数字值原样返回给调用方写备注。"""
-    s = str(v or "").strip()
+    s = "" if v is None else str(v).strip()
     if not s:
         return None, ""
     if s in NON_NUMERIC or s.lower() in NON_NUMERIC:
@@ -120,6 +120,7 @@ def convert(row):
         #                写不下「AK-47 和手榴弹」，所以把原备注也塞进来。
         #   conflict：战争语境提示，留给判定器排除国家间冲突
         "extra": {
+            "casualty_source_values": {"deaths": d_raw, "injured": i_raw},
             "weapon_text": (str(row.get("事件摘要") or "") + " "
                              + str(row.get("备注") or ""))[:500],
             "conflict": "",
